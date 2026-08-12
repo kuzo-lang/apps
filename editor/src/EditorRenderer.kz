@@ -1,0 +1,195 @@
+// EditorRenderer.kz — full-screen terminal renderer with syntax highlighting
+//
+// render_to_string builds the entire frame as a single str (clear screen,
+// visible lines with ANSI colors, status bar, cursor positioning) which the
+// caller writes to the terminal session in one shot.
+//
+// Layout (rows = terminal height):
+//   rows[0..rows-2)  → text area (visible lines from scroll_offset)
+//   row[rows-1]      → status bar (inverse video)
+// Each text row: [gutter: line number + " "][text clipped to visible columns]
+// Cursor is placed at (cursor_line - scroll_offset + 1, gutter_width + cursor_column - scroll_col + 1).
+
+import Editor
+import EditorHighlight
+import GapBuffer
+import std.terminal.Ansi
+
+// Build the complete frame output string.
+// Strategy: clear entire screen (with home cursor), then write each row
+// with explicit clear-line before content. This guarantees no ANSI
+// sequences leak into visible characters and no stale content peeks
+// through when the terminal height is larger than the visible area.
+pub fun render_to_string(ed: Editor): str {
+    var out: str = cursor_hide()
+
+    // Clear entire screen AND move cursor home — clean slate
+    out = out + screen_clear_and_home()
+
+    val total = ed.buffer.line_count()
+    val rows_u = cast(ed.rows).to(usize)
+    val text_rows = if rows_u > 1 { rows_u - 1 } else { 1 }
+    val gw = gutter_width(ed)
+    val cols_u = cast(ed.cols).to(usize)
+    val text_cols = if cols_u > gw { cols_u - gw } else { 1 }
+    val scroll_off = ed.scroll_offset
+    val scroll_col = ed.scroll_col
+
+    var r: usize = 0
+    while r < text_rows {
+        val line_idx = scroll_off + r
+        out = out + cursor_move_to(to_u16(r + 1), 1)
+        // Clear this row first so any leftover characters from a previous
+        // render are erased — this is what eliminates the `[]` artifacts.
+        out = out + clear_line()
+        if line_idx < total {
+            out = out + format_line_number(line_idx + 1, gw)
+            val line = ed.buffer.line_text(line_idx)
+            val rendered = render_line_highlighted(line, scroll_col, text_cols)
+            out = out + rendered
+        } else {
+            out = out + format_blank_gutter(gw)
+            out = out + "~"
+        }
+        r = r + 1
+    }
+
+    // Status bar: clear entire bottom row first, then write content
+    val status_row = to_u16(rows_u)
+    val status = build_status_bar(ed)
+    out = out + cursor_move_to(status_row, 1)
+    out = out + clear_line()
+    out = out + inverse()
+    out = out + status
+    out = out + reset()
+
+    // Restore cursor at the correct on-screen position
+    val cur_screen_line = ed.cursor_line - scroll_off
+    val cur_screen_col = ed.cursor_column - scroll_col + gw
+    out = out + cursor_show()
+    out = out + cursor_move_to(
+        to_u16(cur_screen_line + 1),
+        to_u16(cur_screen_col + 1)
+    )
+
+    out
+}
+
+// Render a single line with syntax highlighting, clipped to [start_col, start_col + max_cols).
+pub fun render_line_highlighted(line: str, start_col: usize, max_cols: usize): str {
+    val tokens = tokenize_line(line)
+    val bytes = line.bytes()
+    val len = bytes.len()
+    val end_col = start_col + max_cols
+    var result: str = ""
+    var pos: usize = 0
+    var i: usize = 0
+    while i < tokens.len() {
+        val tok = tokens[i]
+        if tok.start > pos {
+            val ws_start = if pos < start_col { start_col } else { pos }
+            val ws_end = if tok.start > end_col { end_col } else { tok.start }
+            if ws_start < ws_end && ws_start < len {
+                val actual_end = if ws_end > len { len } else { ws_end }
+                if ws_start < actual_end {
+                    result = result + substring(bytes, ws_start, actual_end)
+                }
+            }
+        }
+        if tok.start >= end_col { break }
+        val tok_start = if tok.start < start_col { start_col } else { tok.start }
+        val tok_end = if tok.end > end_col { end_col } else { tok.end }
+        if tok_start < tok_end && tok_start < len {
+            val actual_end = if tok_end > len { len } else { tok_end }
+            if tok_start < actual_end {
+                result = result + kind_to_color(tok.kind)
+                result = result + substring(bytes, tok_start, actual_end)
+                result = result + reset()
+            }
+        }
+        pos = tok.end
+        if pos >= end_col { break }
+        i = i + 1
+    }
+    if pos < len && pos < end_col {
+        val trail_start = if pos < start_col { start_col } else { pos }
+        val trail_end = if len > end_col { end_col } else { len }
+        if trail_start < trail_end {
+            result = result + substring(bytes, trail_start, trail_end)
+        }
+    }
+    result
+}
+
+// Format line number right-justified in (width - 1) chars, plus a space separator.
+// Example: width=4, line=1 → "  1 "
+fun format_line_number(line_num: usize, width: usize): str {
+    val num_str = cast(line_num).to(str)
+    val num_len = num_str.bytes().len()
+    val pad_count = if num_len < width - 1 { width - 1 - num_len } else { 0 }
+    var pad: str = ""
+    var p: usize = 0
+    while p < pad_count {
+        pad = pad + " "
+        p = p + 1
+    }
+    pad + num_str + " "
+}
+
+// Format a blank gutter (spaces only) for empty lines.
+fun format_blank_gutter(width: usize): str {
+    var s: str = ""
+    var i: usize = 0
+    while i < width {
+        s = s + " "
+        i = i + 1
+    }
+    s
+}
+
+// Build status bar content: filename  [modified]  line:col/total  message  [shortcuts]
+// In prompt mode, shows the prompt input instead of the normal status.
+fun build_status_bar(ed: Editor): str {
+    var s: str = ""
+    match ed.prompt_mode {
+        PromptSearch => {
+            s = "Search: " + ed.prompt_text + "_"
+        },
+        PromptRename => {
+            s = "Rename: " + ed.prompt_text + "_"
+        },
+        _ => {
+            s = ed.filename
+            if ed.dirty {
+                s = s + " [modified]"
+            } else {
+                s = s + "          "
+            }
+            val total = ed.buffer.line_count()
+            s = s + "  line " + cast(ed.cursor_line + 1).to(str) + "/" + cast(total).to(str)
+            s = s + "  col " + cast(ed.cursor_column + 1).to(str)
+            if ed.status_message.len() > 0 {
+                s = s + "  " + ed.status_message
+            }
+            // Show keyboard shortcuts at the end of status bar
+            s = s + "   ^S:save ^N:rename ^F:search ^Q:quit ^Z:undo ^Y:redo"
+        }
+    }
+    // pad to fill row width
+    val cols_u = cast(ed.cols).to(usize)
+    val s_bytes = s.bytes()
+    if s_bytes.len() < cols_u {
+        val pad = cols_u - s_bytes.len()
+        var p: usize = 0
+        while p < pad {
+            s = s + " "
+            p = p + 1
+        }
+    }
+    s
+}
+
+// usize → u16 helper (via i64 intermediate, see Cast.kz conversion chain)
+fun to_u16(n: usize): u16 {
+    cast(cast(n).to(i64)).to(u16)
+}

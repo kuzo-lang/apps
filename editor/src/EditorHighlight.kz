@@ -1,0 +1,259 @@
+// EditorHighlight.kz — syntax highlighting tokenizer for Kuzo
+//
+// Tokenizes a single line of Kuzo source into colored spans.
+// Used by EditorRenderer to apply ANSI colors during full-screen redraw.
+//
+// Design: pure byte-level scanner, no regex dependency.
+// Token categories map to ANSI 16-color bright variants (see Ansi.kz).
+//
+// VM WORKAROUND: nested while loops must use a separate loop variable.
+// Modifying the outer loop's variable inside an inner while loop does not
+// propagate back — the outer loop sees the stale value and loops forever.
+
+import std.terminal.Ansi
+
+// ─── TokenKind: color category for a token ───
+type TokenKind =
+    | TokenDefault        // default identifier / text
+    | TokenKeyword        // keywords (fun, val, var, ...)
+    | TokenType           // type names (i32, str, Capitalized...)
+    | TokenString         // string / char literals
+    | TokenNumber         // numeric literals
+    | TokenComment        // line comments (// ...)
+    | TokenOperator       // operators (+ - * / = ! < > & | ^ ~ . :)
+    | TokenPunctuation    // punctuation ( ) { } [ ] , ; @ # ?
+
+// Token: a highlighted byte span within a line [start, end)
+type Token = Token(
+    start: usize,
+    end: usize,
+    kind: TokenKind
+)
+
+// Map a TokenKind to its ANSI color prefix string.
+pub fun kind_to_color(kind: TokenKind): str {
+    match kind {
+        TokenKeyword => fg_bright_yellow(),
+        TokenType => fg_bright_blue(),
+        TokenString => fg_bright_red(),
+        TokenNumber => fg_bright_green(),
+        TokenComment => fg_bright_black(),
+        TokenOperator => fg_bright_magenta(),
+        TokenPunctuation => fg_bright_cyan(),
+        _ => fg_bright_white()
+    }
+}
+
+// Tokenize a single line into a token list.
+// Returns tokens in left-to-right order; gaps (whitespace) are skipped.
+pub fun tokenize_line(line: str): Token[] {
+    val bytes = line.bytes()
+    val len = bytes.len()
+    var tokens: Token[] = []
+    var i: usize = 0
+    while i < len {
+        val b = bytes[i]
+        // whitespace → skip
+        if b == 0x20u8 || b == 0x09u8 {
+            i = i + 1
+        }
+        // line comment // (0x2F 0x2F)
+        else if b == 0x2Fu8 {
+            if i + 1 < len {
+                if bytes[i + 1] == 0x2Fu8 {
+                    tokens = tokens ++ [Token(i, len, TokenComment)]
+                    i = len
+                } else {
+                    tokens = tokens ++ [Token(i, i + 1, TokenOperator)]
+                    i = i + 1
+                }
+            } else {
+                tokens = tokens ++ [Token(i, i + 1, TokenOperator)]
+                i = i + 1
+            }
+        }
+        // string literal "..." (0x22)
+        else if b == 0x22u8 {
+            val start = i
+            var j = i + 1
+            while j < len {
+                if bytes[j] == 0x22u8 { break }
+                if bytes[j] == 0x5Cu8 {
+                    if j + 1 < len { j = j + 1 }
+                }
+                j = j + 1
+            }
+            if j < len { j = j + 1 }
+            i = j
+            tokens = tokens ++ [Token(start, i, TokenString)]
+        }
+        // char literal '...' (0x27)
+        else if b == 0x27u8 {
+            val start = i
+            var j = i + 1
+            while j < len {
+                if bytes[j] == 0x27u8 { break }
+                if bytes[j] == 0x5Cu8 {
+                    if j + 1 < len { j = j + 1 }
+                }
+                j = j + 1
+            }
+            if j < len { j = j + 1 }
+            i = j
+            tokens = tokens ++ [Token(start, i, TokenString)]
+        }
+        // number: 0x / 0b / 0o / decimal / float
+        else if is_digit(b) {
+            val start = i
+            if b == 0x30u8 {
+                if i + 1 < len {
+                    val h = bytes[i + 1]
+                    if h == 0x78u8 || h == 0x58u8 || h == 0x62u8 || h == 0x42u8 || h == 0x6Fu8 || h == 0x4Fu8 {
+                        var j = i + 2
+                        while j < len {
+                            if !is_hex_digit(bytes[j]) { break }
+                            j = j + 1
+                        }
+                        i = j
+                    } else {
+                        var j = i + 1
+                        while j < len {
+                            if !is_digit(bytes[j]) {
+                                if bytes[j] != 0x2Eu8 { break }
+                            }
+                            j = j + 1
+                        }
+                        i = j
+                    }
+                } else {
+                    i = i + 1
+                }
+            } else {
+                var j = i
+                while j < len {
+                    if !is_digit(bytes[j]) {
+                        if bytes[j] != 0x2Eu8 { break }
+                    }
+                    j = j + 1
+                }
+                i = j
+            }
+            // consume trailing type suffix (u8, i32, etc.)
+            var k = i
+            while k < len {
+                if !is_ident_byte(bytes[k]) { break }
+                k = k + 1
+            }
+            i = k
+            tokens = tokens ++ [Token(start, i, TokenNumber)]
+        }
+        // identifier / keyword / type name
+        else if is_ident_start(b) {
+            val start = i
+            var j = i + 1
+            while j < len {
+                if !is_ident_byte(bytes[j]) { break }
+                j = j + 1
+            }
+            i = j
+            val word = substring(bytes, start, i)
+            val kind = classify_word(word)
+            tokens = tokens ++ [Token(start, i, kind)]
+        }
+        // operators (possibly multi-char: == != <= >= => .. ::)
+        else if is_operator(b) {
+            val start = i
+            i = i + 1
+            if i < len {
+                if is_operator(bytes[i]) { i = i + 1 }
+            }
+            tokens = tokens ++ [Token(start, i, TokenOperator)]
+        }
+        // punctuation
+        else if is_punctuation(b) {
+            tokens = tokens ++ [Token(i, i + 1, TokenPunctuation)]
+            i = i + 1
+        }
+        // default: single byte
+        else {
+            tokens = tokens ++ [Token(i, i + 1, TokenDefault)]
+            i = i + 1
+        }
+    }
+    tokens
+}
+
+// ─── Character class helpers ───
+
+fun is_digit(b: u8): bool {
+    b >= 0x30u8 && b <= 0x39u8
+}
+fun is_hex_digit(b: u8): bool {
+    (b >= 0x30u8 && b <= 0x39u8) || (b >= 0x41u8 && b <= 0x46u8) || (b >= 0x61u8 && b <= 0x66u8)
+}
+fun is_ident_start(b: u8): bool {
+    (b >= 0x41u8 && b <= 0x5Au8) || (b >= 0x61u8 && b <= 0x7Au8) || b == 0x5Fu8
+}
+fun is_ident_byte(b: u8): bool {
+    is_ident_start(b) || is_digit(b)
+}
+fun is_operator(b: u8): bool {
+    b == 0x2Bu8 || b == 0x2Du8 || b == 0x2Au8 || b == 0x2Fu8 || b == 0x25u8 ||
+    b == 0x3Du8 || b == 0x21u8 || b == 0x3Cu8 || b == 0x3Eu8 || b == 0x26u8 ||
+    b == 0x7Cu8 || b == 0x5Eu8 || b == 0x7Eu8 || b == 0x2Eu8 || b == 0x3Au8
+}
+fun is_punctuation(b: u8): bool {
+    b == 0x28u8 || b == 0x29u8 || b == 0x7Bu8 || b == 0x7Du8 || b == 0x5Bu8 || b == 0x5Du8 ||
+    b == 0x2Cu8 || b == 0x3Bu8 || b == 0x40u8 || b == 0x23u8 || b == 0x3Fu8
+}
+
+// ─── Word classification ───
+
+fun classify_word(word: str): TokenKind {
+    if is_keyword(word) {
+        TokenKeyword
+    } else if is_builtin_type(word) {
+        TokenType
+    } else if is_capitalized(word) {
+        TokenType
+    } else {
+        TokenDefault
+    }
+}
+
+fun is_keyword(w: str): bool {
+    w == "fun" || w == "val" || w == "var" || w == "type" || w == "match" ||
+    w == "if" || w == "else" || w == "while" || w == "for" || w == "return" ||
+    w == "break" || w == "continue" || w == "import" || w == "pub" ||
+    w == "throw" || w == "catch" || w == "defer" || w == "async" || w == "await" ||
+    w == "cast" || w == "trait" || w == "impl" || w == "where" || w == "extern" ||
+    w == "true" || w == "false" || w == "void" || w == "null" || w == "in" ||
+    w == "and" || w == "or" || w == "not" || w == "as" || w == "is"
+}
+
+fun is_builtin_type(w: str): bool {
+    w == "i8" || w == "i16" || w == "i32" || w == "i64" || w == "i128" ||
+    w == "u8" || w == "u16" || w == "u32" || w == "u64" || w == "u128" ||
+    w == "usize" || w == "isize" || w == "f16" || w == "f32" || w == "f64" || w == "f128" ||
+    w == "bool" || w == "char" || w == "str" || w == "Throw" || w == "Async" ||
+    w == "Lazy" || w == "Channel" || w == "Sender" || w == "Receiver" || w == "Atomic"
+}
+
+fun is_capitalized(w: str): bool {
+    val bytes = w.bytes()
+    if bytes.len() == 0 { return false }
+    val b = bytes[0]
+    b >= 0x41u8 && b <= 0x5Au8
+}
+
+// Extract substring from byte array [start, end)
+pub fun substring(bytes: u8[], start: usize, end: usize): str {
+    val len = end - start
+    val out: u8[] = [0u8, ..len]
+    var i: usize = 0
+    while i < len {
+        out[i] = bytes[start + i]
+        i = i + 1
+    }
+    cast(out).to(str)
+}

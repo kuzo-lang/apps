@@ -1,0 +1,642 @@
+// Editor.kz — editor state machine + undo/redo
+//
+// Holds the GapBuffer, cursor (line/column), scroll offset, and snapshot-based
+// undo/redo stacks. All mutating logic lives in top-level functions that take
+// Editor by reference; methods are thin wrappers that forward `this` to them.
+//
+// VM constraint: methods never call other this.method() (this binding bug).
+// Instead they call top-level editor_* functions with this as the first arg.
+
+import GapBuffer
+
+// LineColumn: cursor position as (line, column)
+type LineColumn = LineColumn(
+    line: usize,
+    column: usize
+)
+
+// PromptMode: current prompt mode (none, search, or rename)
+type PromptMode =
+    | PromptNone
+    | PromptSearch
+    | PromptRename
+
+// Editor: full editor state
+type Editor = Editor(
+    buffer: GapBuffer,
+    cursor_line: usize,
+    cursor_column: usize,
+    scroll_offset: usize,
+    scroll_col: usize,
+    rows: u16,
+    cols: u16,
+    filename: str,
+    running: bool,
+    undo_stack: u8[][],
+    undo_top: usize,
+    redo_stack: u8[][],
+    redo_top: usize,
+    status_message: str,
+    dirty: bool,
+    prompt_mode: PromptMode,
+    prompt_text: str
+) {
+    pub fun &insert_char(ch: u8): void { editor_insert_char(this, ch) }
+    pub fun &insert_newline(): void { editor_insert_char(this, 0x0Au8) }
+    pub fun &delete_backward(): void { editor_delete_backward(this) }
+    pub fun &delete_forward(): void { editor_delete_forward(this) }
+    pub fun &move_left(): void { editor_move_left(this) }
+    pub fun &move_right(): void { editor_move_right(this) }
+    pub fun &move_up(): void { editor_move_up(this) }
+    pub fun &move_down(): void { editor_move_down(this) }
+    pub fun &move_line_start(): void { editor_move_line_start(this) }
+    pub fun &move_line_end(): void { editor_move_line_end(this) }
+    pub fun &move_to_line_column(line: usize, column: usize): void { editor_move_to_line_column(this, line, column) }
+    pub fun &undo(): void { editor_undo(this) }
+    pub fun &redo(): void { editor_redo(this) }
+    pub fun &quit(): void { this.running = false }
+    pub fun &set_status(msg: str): void { this.status_message = msg }
+}
+
+// ─── Constructors ───
+
+pub fun editor_new(filename: str, rows: u16, cols: u16): Editor {
+    Editor(
+        gap_buffer_new(256),
+        0usize, 0usize, 0usize, 0usize,
+        rows, cols,
+        filename,
+        true,
+        [], 0usize,
+        [], 0usize,
+        "",
+        false,
+        PromptNone,
+        ""
+    )
+}
+
+pub fun editor_from_string(filename: str, content: str, rows: u16, cols: u16): Editor {
+    val ed = editor_new(filename, rows, cols)
+    ed.buffer = gap_buffer_from_string(content)
+    editor_sync_cursor(ed)
+    ed
+}
+
+// ─── File I/O ───
+
+// Save buffer to ed.filename using sync raw file I/O.
+// flags: OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE = 2 | 4 | 8 = 14
+// mode: 0o644 (rw-r--r--)
+// Returns true on success; sets status_message with result.
+pub fun editor_save_file(ed: Editor): bool {
+    val path = ed.filename
+    val fd = __file_open_raw(path, 14, 0o644)
+    if fd < 0 {
+        ed.status_message = "save failed: cannot open " + path
+        return false
+    }
+    val bytes = ed.buffer.to_bytes()
+    val len = bytes.len()
+    val written = __file_write(fd, bytes, len)
+    __file_close_raw(fd)
+    if written < 0 {
+        ed.status_message = "save failed: write error"
+        return false
+    }
+    if cast(written).to(usize) < len {
+        ed.status_message = "save failed: incomplete write"
+        return false
+    }
+    ed.dirty = false
+    ed.status_message = "saved " + cast(len).to(str) + " bytes"
+    true
+}
+
+// Load file content from path into the editor buffer.
+// Returns true on success; sets status_message with result.
+pub fun editor_load_file(ed: Editor, path: str): bool {
+    // flags: OPEN_READ = 1
+    val fd = __file_open_raw(path, 1, 0)
+    if fd < 0 {
+        ed.status_message = "load failed: cannot open " + path
+        return false
+    }
+    // Read in chunks into a string accumulator (amortized O(n), avoids O(n^2) of u8[] ++).
+    var content: str = ""
+    val chunk: u8[] = [0u8, ..4096]
+    loop {
+        val n = __file_read_into(fd, chunk, 4096)
+        if n <= 0 { break }
+        val slice = chunk[0..cast(n).to(usize)]
+        content = content + cast(slice).to(str)
+    }
+    __file_close_raw(fd)
+    ed.filename = path
+    ed.buffer = gap_buffer_from_string(content)
+    ed.undo_stack = []
+    ed.undo_top = 0
+    ed.redo_stack = []
+    ed.redo_top = 0
+    ed.dirty = false
+    ed.scroll_offset = 0
+    ed.scroll_col = 0
+    editor_sync_cursor(ed)
+    ed.status_message = "loaded " + cast(content.bytes().len()).to(str) + " bytes"
+    true
+}
+
+// ─── Editing ───
+
+pub fun editor_insert_char(ed: Editor, ch: u8): void {
+    editor_push_undo(ed)
+    ed.buffer.insert_byte(ch)
+    editor_sync_cursor(ed)
+    ed.dirty = true
+    ed.status_message = ""
+}
+
+pub fun editor_delete_backward(ed: Editor): void {
+    if ed.buffer.gap_start == 0 { return }
+    editor_push_undo(ed)
+    ed.buffer.delete_char_backward()
+    editor_sync_cursor(ed)
+    editor_ensure_visible(ed, ed.cursor_line)
+    editor_ensure_column_visible(ed, ed.cursor_column)
+    ed.dirty = true
+    ed.status_message = ""
+}
+
+pub fun editor_delete_forward(ed: Editor): void {
+    if ed.buffer.gap_end >= ed.buffer.buffer.len() { return }
+    editor_push_undo(ed)
+    ed.buffer.delete_char_forward()
+    editor_sync_cursor(ed)
+    editor_ensure_visible(ed, ed.cursor_line)
+    editor_ensure_column_visible(ed, ed.cursor_column)
+    ed.dirty = true
+    ed.status_message = ""
+}
+
+// ─── Movement ───
+
+pub fun editor_move_left(ed: Editor): void {
+    if ed.buffer.gap_start == 0 { return }
+    val inner = ed.buffer.buffer
+    var i = ed.buffer.gap_start
+    i = i - 1
+    while i > 0 && (inner[i] & 0xC0u8) == 0x80u8 {
+        i = i - 1
+    }
+    ed.buffer.move_gap_to(i)
+    editor_sync_cursor(ed)
+    editor_ensure_visible(ed, ed.cursor_line)
+    editor_ensure_column_visible(ed, ed.cursor_column)
+}
+
+pub fun editor_move_right(ed: Editor): void {
+    if ed.buffer.gap_end >= ed.buffer.buffer.len() { return }
+    val inner = ed.buffer.buffer
+    val b = inner[ed.buffer.gap_end]
+    var step: usize = 1
+    if b >= 0xF0u8 { step = 4 }
+    else if b >= 0xE0u8 { step = 3 }
+    else if b >= 0xC0u8 { step = 2 }
+    ed.buffer.move_gap_to(ed.buffer.gap_start + step)
+    editor_sync_cursor(ed)
+    editor_ensure_visible(ed, ed.cursor_line)
+    editor_ensure_column_visible(ed, ed.cursor_column)
+}
+
+pub fun editor_move_up(ed: Editor): void {
+    if ed.cursor_line == 0 { return }
+    editor_move_to_line_column(ed, ed.cursor_line - 1, ed.cursor_column)
+}
+
+pub fun editor_move_down(ed: Editor): void {
+    val total = ed.buffer.line_count()
+    if ed.cursor_line + 1 >= total { return }
+    editor_move_to_line_column(ed, ed.cursor_line + 1, ed.cursor_column)
+}
+
+// Page Up: move cursor up by (text_rows - 1) lines, scroll if needed.
+pub fun editor_page_up(ed: Editor): void {
+    val page_size = page_step(ed)
+    val target = if ed.cursor_line >= page_size { ed.cursor_line - page_size } else { 0 }
+    editor_move_to_line_column(ed, target, ed.cursor_column)
+}
+
+// Page Down: move cursor down by (text_rows - 1) lines, scroll if needed.
+pub fun editor_page_down(ed: Editor): void {
+    val total = ed.buffer.line_count()
+    val page_size = page_step(ed)
+    val target = if ed.cursor_line + page_size >= total { total - 1 } else { ed.cursor_line + page_size }
+    editor_move_to_line_column(ed, target, ed.cursor_column)
+}
+
+// Page step = text area height - 1 (keep one line of context visible).
+fun page_step(ed: Editor): usize {
+    val rows_u = cast(ed.rows).to(usize)
+    if rows_u > 2 { rows_u - 2 } else { 1 }
+}
+
+pub fun editor_move_line_start(ed: Editor): void {
+    val inner = ed.buffer.buffer
+    var i = ed.buffer.gap_start
+    while i > 0 && inner[i - 1] != 0x0Au8 {
+        i = i - 1
+    }
+    ed.buffer.move_gap_to(i)
+    editor_sync_cursor(ed)
+    editor_ensure_visible(ed, ed.cursor_line)
+    editor_ensure_column_visible(ed, ed.cursor_column)
+}
+
+pub fun editor_move_line_end(ed: Editor): void {
+    val inner = ed.buffer.buffer
+    var i = ed.buffer.gap_end
+    while i < inner.len() && inner[i] != 0x0Au8 {
+        i = i + 1
+    }
+    ed.buffer.move_gap_to(ed.buffer.gap_start + (i - ed.buffer.gap_end))
+    editor_sync_cursor(ed)
+    editor_ensure_visible(ed, ed.cursor_line)
+    editor_ensure_column_visible(ed, ed.cursor_column)
+}
+
+pub fun editor_move_to_line_column(ed: Editor, line: usize, column: usize): void {
+    val buf = ed.buffer
+    val total = buf.line_count()
+    val target_line = if line >= total { total - 1 } else { line }
+    val line_start = buf.line_start_offset(target_line)
+    val next_start = if target_line + 1 < total {
+        buf.line_start_offset(target_line + 1)
+    } else {
+        buf.text_byte_length()
+    }
+    val line_len = next_start - line_start
+    val target_col = if column > line_len { line_len } else { column }
+    ed.buffer.move_gap_to(line_start + target_col)
+    editor_sync_cursor(ed)
+    editor_ensure_visible(ed, ed.cursor_line)
+    editor_ensure_column_visible(ed, ed.cursor_column)
+}
+
+// ─── Undo / Redo ───
+
+pub fun editor_push_undo(ed: Editor): void {
+    val snap = ed.buffer.to_bytes()
+    ed.undo_stack = ed.undo_stack ++ [snap]
+    ed.undo_top = ed.undo_top + 1
+    ed.redo_stack = []
+    ed.redo_top = 0
+}
+
+pub fun editor_undo(ed: Editor): void {
+    val stack = ed.undo_stack
+    val top = ed.undo_top
+    if top == 0 {
+        ed.status_message = "nothing to undo"
+        return
+    }
+    ed.dirty = true
+    // Pop top of undo stack and push to redo stack
+    val last_idx = top - 1
+    val snap = stack[last_idx]
+    // push current to redo
+    val cur = ed.buffer.to_bytes()
+    ed.redo_stack = ed.redo_stack ++ [cur]
+    ed.redo_top = ed.redo_top + 1
+    // truncate undo stack (remove the popped entry)
+    var new_stack: u8[][] = []
+    var k: usize = 0
+    while k < last_idx {
+        new_stack = new_stack ++ [stack[k]]
+        k = k + 1
+    }
+    ed.undo_stack = new_stack
+    ed.undo_top = last_idx
+    // restore buffer from snapshot
+    ed.buffer = gap_buffer_from_bytes(snap)
+    editor_sync_cursor(ed)
+    editor_ensure_visible(ed, ed.cursor_line)
+    editor_ensure_column_visible(ed, ed.cursor_column)
+    ed.status_message = "undid"
+}
+
+pub fun editor_redo(ed: Editor): void {
+    val stack = ed.redo_stack
+    val top = ed.redo_top
+    if top == 0 {
+        ed.status_message = "nothing to redo"
+        return
+    }
+    val last_idx = top - 1
+    val snap = stack[last_idx]
+    // truncate redo stack (remove the popped entry)
+    var new_stack: u8[][] = []
+    var k: usize = 0
+    while k < last_idx {
+        new_stack = new_stack ++ [stack[k]]
+        k = k + 1
+    }
+    ed.redo_stack = new_stack
+    ed.redo_top = last_idx
+    // restore buffer from snapshot
+    ed.buffer = gap_buffer_from_bytes(snap)
+    editor_sync_cursor(ed)
+    editor_ensure_visible(ed, ed.cursor_line)
+    editor_ensure_column_visible(ed, ed.cursor_column)
+    ed.dirty = true
+    ed.status_message = "redid"
+}
+
+// ─── Shared helpers ───
+
+// Compute (line, column) for a logical byte offset in the buffer.
+fun compute_line_column(buf: GapBuffer, offset: usize): LineColumn {
+    val gs = buf.gap_start
+    val ge = buf.gap_end
+    val inner = buf.buffer
+    var line: usize = 0
+    var col: usize = 0
+    var phys: usize = 0
+    var logical: usize = 0
+    while logical < offset {
+        val b = inner[phys]
+        if b == 0x0Au8 {
+            line = line + 1
+            col = 0
+        } else {
+            col = col + 1
+        }
+        phys = phys + 1
+        if phys == gs { phys = ge }
+        logical = logical + 1
+    }
+    LineColumn(line, col)
+}
+
+// Sync cursor from buffer gap position.
+fun editor_sync_cursor(ed: Editor): void {
+    val buf = ed.buffer
+    val lc = compute_line_column(buf, buf.gap_start)
+    ed.cursor_line = lc.line
+    ed.cursor_column = lc.column
+}
+
+// Adjust scroll_offset so the given line is visible.
+pub fun editor_ensure_visible(ed: Editor, line: usize): void {
+    val rows_u = cast(ed.rows).to(usize)
+    val text_rows = if rows_u > 1 { rows_u - 1 } else { 1 }
+    val off = ed.scroll_offset
+    if line < off {
+        ed.scroll_offset = line
+    } else if line >= off + text_rows {
+        ed.scroll_offset = line - text_rows + 1
+    }
+}
+
+// Adjust scroll_col so the given column is visible within the text area
+// (after accounting for the gutter width).
+pub fun editor_ensure_column_visible(ed: Editor, column: usize): void {
+    val gw = gutter_width(ed)
+    val cols_u = cast(ed.cols).to(usize)
+    if cols_u <= gw { return }
+    val text_cols = cols_u - gw
+    val sc = ed.scroll_col
+    if column < sc {
+        ed.scroll_col = column
+    } else if column >= sc + text_cols {
+        ed.scroll_col = column - text_cols + 1
+    }
+}
+
+// Gutter width: number of terminal columns used for line numbers + separator.
+// Format: right-justified line number + " " separator.
+// For n lines, width = max(3, digits(n)) + 1.
+pub fun gutter_width(ed: Editor): usize {
+    val total = ed.buffer.line_count()
+    val digits = count_digits(total)
+    if digits < 3 { 4 } else { digits + 1 }
+}
+
+fun count_digits(n: usize): usize {
+    if n < 10 { 1 }
+    else if n < 100 { 2 }
+    else if n < 1000 { 3 }
+    else if n < 10000 { 4 }
+    else if n < 100000 { 5 }
+    else if n < 1000000 { 6 }
+    else { 7 }
+}
+
+// Extract the base filename from a path (e.g., "/path/to/file.txt" → "file.txt")
+fun basename(path: str): str {
+    val bytes = path.bytes()
+    val len = bytes.len()
+    var last_slash: i64 = -1
+    var i: usize = 0
+    while i < len {
+        if bytes[i] == 0x2Fu8 { // '/'
+            last_slash = cast(i).to(i64)
+        }
+        i = i + 1
+    }
+    if last_slash < 0 { return path }
+    val start = cast(last_slash + 1).to(usize)
+    substring(bytes, start, len)
+}
+
+// Extract the directory from a path (e.g., "/path/to/file.txt" → "/path/to/")
+fun dirname(path: str): str {
+    val bytes = path.bytes()
+    val len = bytes.len()
+    var last_slash: i64 = -1
+    var i: usize = 0
+    while i < len {
+        if bytes[i] == 0x2Fu8 { // '/'
+            last_slash = cast(i).to(i64)
+        }
+        i = i + 1
+    }
+    if last_slash < 0 { return "" }
+    val end = cast(last_slash + 1).to(usize)
+    substring(bytes, 0, end)
+}
+
+// ─── Prompt mode (search / rename) ───
+
+pub fun editor_start_search(ed: Editor): void {
+    ed.prompt_mode = PromptSearch
+    ed.prompt_text = ""
+    ed.status_message = ""
+}
+
+pub fun editor_start_rename(ed: Editor): void {
+    ed.prompt_mode = PromptRename
+    // Initialize with current filename (without path) so user can edit it
+    val current_name = basename(ed.filename)
+    ed.prompt_text = current_name
+    ed.status_message = ""
+}
+
+pub fun editor_prompt_insert_char(ed: Editor, ch: u8): void {
+    // only accept printable chars
+    if ch >= 0x20u8 && ch <= 0x7Eu8 {
+        ed.prompt_text = ed.prompt_text + cast([ch]).to(str)
+    }
+}
+
+pub fun editor_prompt_backspace(ed: Editor): void {
+    val bytes = ed.prompt_text.bytes()
+    val len = bytes.len()
+    if len == 0 { return }
+    // handle UTF-8: step back over continuation bytes
+    var i = len - 1
+    while i > 0 && (bytes[i] & 0xC0u8) == 0x80u8 {
+        i = i - 1
+    }
+    ed.prompt_text = substring(bytes, 0, i)
+}
+
+pub fun editor_confirm_prompt(ed: Editor): void {
+    match ed.prompt_mode {
+        PromptSearch => {
+            val query = ed.prompt_text
+            ed.prompt_mode = PromptNone
+            if query.bytes().len() == 0 {
+                ed.status_message = "search cancelled"
+            } else if editor_search_next(ed, query) {
+                ed.status_message = "found: " + query
+            } else {
+                ed.status_message = "not found: " + query
+            }
+        },
+        PromptRename => {
+            val new_name = ed.prompt_text
+            ed.prompt_mode = PromptNone
+            if new_name.bytes().len() == 0 {
+                ed.status_message = "rename cancelled"
+            } else {
+                val old_path = ed.filename
+                val new_path = dirname(old_path) + new_name
+                // If the file is dirty, save first then rename
+                if ed.dirty {
+                    editor_save_file(ed)
+                }
+                // Try to rename the actual file
+                val rc = __file_rename_raw(old_path, new_path)
+                if rc < 0 {
+                    ed.status_message = "rename failed: cannot rename file"
+                } else {
+                    ed.filename = new_path
+                    ed.dirty = true // Content changed relative to new file
+                    ed.status_message = "renamed to: " + new_name
+                }
+            }
+        },
+        _ => {
+            ed.prompt_mode = PromptNone
+        }
+    }
+}
+
+pub fun editor_cancel_prompt(ed: Editor): void {
+    ed.prompt_mode = PromptNone
+    ed.status_message = ""
+}
+
+// Search forward from cursor position for the next occurrence of query.
+// Wraps around to the beginning if not found after cursor.
+// Returns true if a match was found and cursor moved.
+pub fun editor_search_next(ed: Editor, query: str): bool {
+    val qbytes = query.bytes()
+    val qlen = qbytes.len()
+    if qlen == 0 { return false }
+    val text = ed.buffer.to_bytes()
+    val tlen = text.len()
+    if qlen > tlen { return false }
+
+    // search starting from cursor + 1
+    val start_pos = ed.buffer.gap_start + 1
+    var found = false
+    var found_at: usize = 0
+
+    // forward search from start_pos to end
+    var i = start_pos
+    while i + qlen <= tlen && !found {
+        var j: usize = 0
+        var ok = true
+        while j < qlen && ok {
+            if text[i + j] != qbytes[j] {
+                ok = false
+            }
+            j = j + 1
+        }
+        if ok {
+            found = true
+            found_at = i
+        }
+        i = i + 1
+    }
+
+    // wrap-around: search from 0 to start_pos
+    if !found && start_pos > 0 {
+        val limit = if start_pos < tlen { start_pos } else { tlen }
+        i = 0
+        while i + qlen <= limit && !found {
+            var j: usize = 0
+            var ok = true
+            while j < qlen && ok {
+                if text[i + j] != qbytes[j] {
+                    ok = false
+                }
+                j = j + 1
+            }
+            if ok {
+                found = true
+                found_at = i
+            }
+            i = i + 1
+        }
+    }
+
+    if found {
+        ed.buffer.move_gap_to(found_at)
+        editor_sync_cursor(ed)
+        editor_ensure_visible(ed, ed.cursor_line)
+        editor_ensure_column_visible(ed, ed.cursor_column)
+        true
+    } else {
+        false
+    }
+}
+
+// Parse a decimal string to usize. Returns 0 on invalid input.
+fun parse_usize(s: str): usize {
+    val bytes = s.bytes()
+    val len = bytes.len()
+    if len == 0 { return 0 }
+    var result: usize = 0
+    var i: usize = 0
+    while i < len {
+        val b = bytes[i]
+        if b < 0x30u8 || b > 0x39u8 { return 0 }
+        result = result * 10 + cast(b - 0x30u8).to(usize)
+        i = i + 1
+    }
+    result
+}
+
+// Extract substring from byte array [start, end).
+fun substring(bytes: u8[], start: usize, end: usize): str {
+    val len = end - start
+    val out: u8[] = [0u8, ..len]
+    var i: usize = 0
+    while i < len {
+        out[i] = bytes[start + i]
+        i = i + 1
+    }
+    cast(out).to(str)
+}

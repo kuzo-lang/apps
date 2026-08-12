@@ -1,0 +1,370 @@
+// TestBoolLogic.kz — diagnose && / || / ! bugs in if and while conditions
+
+fun main(): void {
+    println("=== Bool Logic Diagnostic Tests ===")
+    println("")
+
+    // ─── Group 1: if with && ───
+    println("--- Group 1: if with && ---")
+
+    // 1a: if (true && true)
+    var ok1 = true
+    if true && true {
+        println("1a PASS: if (true && true) -> true")
+    } else {
+        println("1a FAIL: if (true && true) -> false (expected true)")
+        ok1 = false
+    }
+
+    // 1b: if (true && false)
+    if true && false {
+        println("1b FAIL: if (true && false) -> true (expected false)")
+        ok1 = false
+    } else {
+        println("1b PASS: if (true && false) -> false")
+    }
+
+    // 1c: if with bool variable in &&
+    var flag1 = false
+    if true && flag1 {
+        println("1c FAIL: if (true && flag1=false) -> true (expected false)")
+        ok1 = false
+    } else {
+        println("1c PASS: if (true && flag1=false) -> false")
+    }
+
+    // 1d: if with bool variable = true in &&
+    flag1 = true
+    if true && flag1 {
+        println("1d PASS: if (true && flag1=true) -> true")
+    } else {
+        println("1d FAIL: if (true && flag1=true) -> false (expected true)")
+        ok1 = false
+    }
+
+    // 1e: if with !bool_variable in &&
+    flag1 = true
+    if true && !flag1 {
+        println("1e FAIL: if (true && !flag1=true) -> true (expected false)")
+        ok1 = false
+    } else {
+        println("1e PASS: if (true && !flag1=true) -> false")
+    }
+
+    // 1f: if with !false_variable in &&
+    flag1 = false
+    if true && !flag1 {
+        println("1f PASS: if (true && !flag1=false) -> true")
+    } else {
+        println("1f FAIL: if (true && !flag1=false) -> false (expected true)")
+        ok1 = false
+    }
+
+    // ─── Group 2: if with || ───
+    println("")
+    println("--- Group 2: if with || ---")
+
+    // 2a: if (true || false)
+    if true || false {
+        println("2a PASS: if (true || false) -> true")
+    } else {
+        println("2a FAIL: if (true || false) -> false (expected true)")
+    }
+
+    // 2b: if (false || false)
+    if false || false {
+        println("2b FAIL: if (false || false) -> true (expected false)")
+    } else {
+        println("2b PASS: if (false || false) -> false")
+    }
+
+    // 2c: if with bool variable in ||
+    var flag2 = false
+    if true || flag2 {
+        println("2c PASS: if (true || flag2=false) -> true")
+    } else {
+        println("2c FAIL: if (true || flag2=false) -> false (expected true)")
+    }
+
+    // 2d: if with false || true_variable
+    flag2 = true
+    if false || flag2 {
+        println("2d PASS: if (false || flag2=true) -> true")
+    } else {
+        println("2d FAIL: if (false || flag2=true) -> false (expected true)")
+    }
+
+    // 2e: if with false || !true_variable
+    flag2 = true
+    if false || !flag2 {
+        println("2e FAIL: if (false || !flag2=true) -> true (expected false)")
+    } else {
+        println("2e PASS: if (false || !flag2=true) -> false")
+    }
+
+    // 2f: if with false || !false_variable
+    flag2 = false
+    if false || !flag2 {
+        println("2f PASS: if (false || !flag2=false) -> true")
+    } else {
+        println("2f FAIL: if (false || !flag2=false) -> false (expected true)")
+    }
+
+    // ─── Group 3: while with && ───
+    println("")
+    println("--- Group 3: while with && ---")
+
+    // 3a: while (cond && !found) — the original bug
+    var found3a = false
+    var count3a: usize = 0
+    var i3a: usize = 0
+    while i3a < 5 && !found3a {
+        count3a = count3a + 1
+        if i3a == 2 {
+            found3a = true
+        }
+        i3a = i3a + 1
+    }
+    // Expected: loop runs 3 times (i=0,1,2), found3a=true at i=2, count3a=3
+    if count3a == 3 && found3a {
+        println("3a PASS: while (i<5 && !found) count=" + cast(count3a).to(str) + " (expected 3)")
+    } else {
+        println("3a FAIL: while (i<5 && !found) count=" + cast(count3a).to(str) + " found=" + cast(found3a).to(str) + " (expected count=3, found=true)")
+    }
+
+    // 3b: while (cond && bool_var) where bool_var starts true
+    var active3b = true
+    var count3b: usize = 0
+    var i3b: usize = 0
+    while i3b < 5 && active3b {
+        count3b = count3b + 1
+        if i3b == 1 {
+            active3b = false
+        }
+        i3b = i3b + 1
+    }
+    // Expected: loop runs 2 times (i=0,1), active3b=false at i=1, count3b=2
+    if count3b == 2 && active3b == false {
+        println("3b PASS: while (i<5 && active) count=" + cast(count3b).to(str) + " (expected 2)")
+    } else {
+        println("3b FAIL: while (i<5 && active) count=" + cast(count3b).to(str) + " active=" + cast(active3b).to(str) + " (expected count=2, active=false)")
+    }
+
+    // 3c: while (cond && true) — literal true
+    var count3c: usize = 0
+    var i3c: usize = 0
+    while i3c < 3 && true {
+        count3c = count3c + 1
+        i3c = i3c + 1
+    }
+    if count3c == 3 {
+        println("3c PASS: while (i<3 && true) count=" + cast(count3c).to(str) + " (expected 3)")
+    } else {
+        println("3c FAIL: while (i<3 && true) count=" + cast(count3c).to(str) + " (expected 3)")
+    }
+
+    // ─── Group 4: while with || ───
+    println("")
+    println("--- Group 4: while with || ---")
+
+    // 4a: while (cond || found) — || with bool var
+    var found4a = false
+    var count4a: usize = 0
+    var i4a: usize = 0
+    while i4a < 3 || found4a {
+        count4a = count4a + 1
+        if i4a >= 3 && found4a == false {
+            found4a = true
+        }
+        if i4a >= 3 && found4a {
+            // second pass: found4a is true, exit after this
+            found4a = false
+        }
+        i4a = i4a + 1
+        if count4a > 10 {
+            println("4a FAIL: infinite loop detected")
+            return
+        }
+    }
+    // This is complex; just report the result
+    println("4a INFO: while (i<3 || found) count=" + cast(count4a).to(str) + " i=" + cast(i4a).to(str) + " found=" + cast(found4a).to(str))
+
+    // 4b: while (false || cond) — || with literal false
+    var count4b: usize = 0
+    var i4b: usize = 0
+    while false || i4b < 3 {
+        count4b = count4b + 1
+        i4b = i4b + 1
+    }
+    if count4b == 3 {
+        println("4b PASS: while (false || i<3) count=" + cast(count4b).to(str) + " (expected 3)")
+    } else {
+        println("4b FAIL: while (false || i<3) count=" + cast(count4b).to(str) + " (expected 3)")
+    }
+
+    // 4c: while (cond || !found) — || with !bool_var
+    var found4c = true
+    var count4c: usize = 0
+    var i4c: usize = 0
+    while i4c < 3 || !found4c {
+        count4c = count4c + 1
+        i4c = i4c + 1
+        if count4c > 10 {
+            println("4c FAIL: infinite loop detected")
+            return
+        }
+    }
+    // i4c reaches 3, found4c=true, !found4c=false → 3||false = true... hmm
+    // Actually when i4c=3: 3<3=false, !true=false → false||false=false → exit
+    if count4c == 3 {
+        println("4c PASS: while (i<3 || !found) count=" + cast(count4c).to(str) + " (expected 3)")
+    } else {
+        println("4c FAIL: while (i<3 || !found) count=" + cast(count4c).to(str) + " (expected 3)")
+    }
+
+    // ─── Group 5: multiple && ───
+    println("")
+    println("--- Group 5: multiple && (a && b && c) ---")
+
+    // 5a: if with three && conditions
+    var a5 = true
+    var b5 = true
+    var c5 = true
+    if a5 && b5 && c5 {
+        println("5a PASS: if (a && b && c) all true -> true")
+    } else {
+        println("5a FAIL: if (a && b && c) all true -> false (expected true)")
+    }
+
+    // 5b: if with three && conditions, one false
+    c5 = false
+    if a5 && b5 && c5 {
+        println("5b FAIL: if (a && b && c) c=false -> true (expected false)")
+    } else {
+        println("5b PASS: if (a && b && c) c=false -> false")
+    }
+
+    // 5c: while with three && conditions
+    var done5c = false
+    var count5c: usize = 0
+    var i5c: usize = 0
+    while i5c < 5 && i5c < 10 && !done5c {
+        count5c = count5c + 1
+        if i5c == 2 {
+            done5c = true
+        }
+        i5c = i5c + 1
+    }
+    if count5c == 3 && done5c {
+        println("5c PASS: while (i<5 && i<10 && !done) count=" + cast(count5c).to(str) + " (expected 3)")
+    } else {
+        println("5c FAIL: while (i<5 && i<10 && !done) count=" + cast(count5c).to(str) + " done=" + cast(done5c).to(str) + " (expected count=3, done=true)")
+    }
+
+    // ─── Group 6: && and || mixed ───
+    println("")
+    println("--- Group 6: && and || mixed ---")
+
+    // 6a: if (true && false || true) — (true && false) || true = false || true = true
+    if true && false || true {
+        println("6a PASS: if (true && false || true) -> true")
+    } else {
+        println("6a FAIL: if (true && false || true) -> false (expected true)")
+    }
+
+    // 6b: if (true || false && false) — true || (false && false) = true || false = true
+    if true || false && false {
+        println("6b PASS: if (true || false && false) -> true")
+    } else {
+        println("6b FAIL: if (true || false && false) -> false (expected true)")
+    }
+
+    // 6c: if (false && true || false) — (false && true) || false = false || false = false
+    if false && true || false {
+        println("6c FAIL: if (false && true || false) -> true (expected false)")
+    } else {
+        println("6c PASS: if (false && true || false) -> false")
+    }
+
+    // 6d: while with mixed && and ||
+    var flag6d = false
+    var count6d: usize = 0
+    var i6d: usize = 0
+    while i6d < 5 && !flag6d || false {
+        count6d = count6d + 1
+        if i6d == 2 {
+            flag6d = true
+        }
+        i6d = i6d + 1
+        if count6d > 10 {
+            println("6d FAIL: infinite loop detected")
+            return
+        }
+    }
+    // (i<5 && !flag) || false = (i<5 && !flag)
+    // Expected: count=3, flag=true
+    if count6d == 3 && flag6d {
+        println("6d PASS: while (i<5 && !flag || false) count=" + cast(count6d).to(str) + " (expected 3)")
+    } else {
+        println("6d FAIL: while (i<5 && !flag || false) count=" + cast(count6d).to(str) + " flag=" + cast(flag6d).to(str) + " (expected count=3, flag=true)")
+    }
+
+    // ─── Group 7: ! in conditions ───
+    println("")
+    println("--- Group 7: ! negation in conditions ---")
+
+    // 7a: if (!false)
+    if !false {
+        println("7a PASS: if (!false) -> true")
+    } else {
+        println("7a FAIL: if (!false) -> false (expected true)")
+    }
+
+    // 7b: if (!true)
+    if !true {
+        println("7b FAIL: if (!true) -> true (expected false)")
+    } else {
+        println("7b PASS: if (!true) -> false")
+    }
+
+    // 7c: while (!done) — single ! in while
+    var done7c = false
+    var count7c: usize = 0
+    while !done7c {
+        count7c = count7c + 1
+        if count7c >= 3 {
+            done7c = true
+        }
+        if count7c > 10 {
+            println("7c FAIL: infinite loop")
+            return
+        }
+    }
+    if count7c == 3 {
+        println("7c PASS: while (!done) count=" + cast(count7c).to(str) + " (expected 3)")
+    } else {
+        println("7c FAIL: while (!done) count=" + cast(count7c).to(str) + " (expected 3)")
+    }
+
+    // ─── Group 8: comparison && comparison (no bool vars) ───
+    println("")
+    println("--- Group 8: comparison && comparison in while ---")
+
+    // 8a: while (i < n && j < m) — two comparisons
+    var count8a: usize = 0
+    var i8a: usize = 0
+    var j8a: usize = 0
+    while i8a < 3 && j8a < 3 {
+        count8a = count8a + 1
+        i8a = i8a + 1
+        j8a = j8a + 1
+    }
+    if count8a == 3 {
+        println("8a PASS: while (i<3 && j<3) count=" + cast(count8a).to(str) + " (expected 3)")
+    } else {
+        println("8a FAIL: while (i<3 && j<3) count=" + cast(count8a).to(str) + " (expected 3)")
+    }
+
+    println("")
+    println("=== Diagnostic Complete ===")
+}

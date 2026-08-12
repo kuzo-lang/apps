@@ -1,0 +1,88 @@
+// EditorCommands.kz — key dispatch
+//
+// Maps decoded Key values to editor operations. Called from the main loop
+// on each keypress. In prompt mode (search/rename), key handling is
+// redirected to prompt editing. Control-key combos handle quit/save/undo/redo.
+
+import Editor
+import std.terminal.Key
+
+// Dispatch a decoded key to the appropriate editor operation.
+pub fun handle_key(ed: Editor, key: Key): void {
+    // In prompt mode, redirect most keys to prompt handling
+    match ed.prompt_mode {
+        PromptSearch => { handle_prompt_key(ed, key); return },
+        PromptRename => { handle_prompt_key(ed, key); return },
+        _ => {}
+    }
+
+    match key {
+        CharacterKey(ch) => { editor_insert_char(ed, ch); },
+        EnterKey => { editor_insert_char(ed, 0x0Au8); },
+        BackspaceKey => { editor_delete_backward(ed); },
+        TabKey => { handle_tab(ed); },
+        ArrowLeft => { editor_move_left(ed); },
+        ArrowRight => { editor_move_right(ed); },
+        ArrowUp => { editor_move_up(ed); },
+        ArrowDown => { editor_move_down(ed); },
+        HomeKey => { editor_move_line_start(ed); },
+        EndKey => { editor_move_line_end(ed); },
+        PageUpKey => { editor_page_up(ed); },
+        PageDownKey => { editor_page_down(ed); },
+        DeleteKey => { editor_delete_forward(ed); },
+        ControlKey(b) => { handle_ctrl(ed, b); },
+        _ => {}
+    }
+}
+
+// Expand Tab to spaces (tab stop every 8 columns).
+fun handle_tab(ed: Editor): void {
+    val col = ed.cursor_column
+    val next_stop = ((col / 8) + 1) * 8
+    val spaces = next_stop - col
+    var i: usize = 0
+    while i < spaces {
+        editor_insert_char(ed, 0x20u8)
+        i = i + 1
+    }
+    editor_ensure_column_visible(ed, ed.cursor_column)
+}
+
+// Handle keys while in prompt mode (search or rename).
+fun handle_prompt_key(ed: Editor, key: Key): void {
+    match key {
+        CharacterKey(ch) => { editor_prompt_insert_char(ed, ch); },
+        BackspaceKey => { editor_prompt_backspace(ed); },
+        EnterKey => { editor_confirm_prompt(ed); },
+        EscapeKey => { editor_cancel_prompt(ed); },
+        ControlKey(b) => {
+            if b == 0x11u8 {
+                ed.running = false
+            }
+        },
+        _ => {}
+    }
+}
+
+// Control-key shortcuts:
+//   Ctrl+Q (0x11) → quit
+//   Ctrl+S (0x13) → save to file
+//   Ctrl+N (0x0E) → rename file
+//   Ctrl+Z (0x1A) → undo
+//   Ctrl+Y (0x19) → redo
+//   Ctrl+F (0x06) → search
+pub fun handle_ctrl(ed: Editor, b: u8): void {
+    if b == 0x11u8 {
+        ed.running = false
+    } else if b == 0x13u8 {
+        editor_save_file(ed)
+    } else if b == 0x1Au8 {
+        editor_undo(ed)
+    } else if b == 0x19u8 {
+        editor_redo(ed)
+    } else if b == 0x06u8 {
+        editor_start_search(ed)
+    } else if b == 0x0Eu8 {
+        editor_start_rename(ed)
+    }
+}

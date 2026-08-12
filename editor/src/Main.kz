@@ -1,0 +1,78 @@
+// Main.kz — editor entry point
+
+import Editor
+import EditorCommands
+import EditorRenderer
+import std.terminal.Session
+import std.terminal.Key
+import std.terminal.Ansi
+
+fun main(args: str[]): void {
+    val session = match enter_raw_mode() {
+        Ok(s) => s,
+        Err(e) => { eprint("ERR: raw " + e.msg + "\r\n"); return }
+    }
+    defer session.exit_raw_mode()
+
+    val size = match session.get_size() {
+        Ok(sz) => sz,
+        Err(e) => { eprint("ERR: size " + e.msg + "\r\n"); return }
+    }
+    // Fallback for terminals that report 0×0 (e.g. script(1), some pty wrappers)
+    val rows = if size.rows == 0 { 24u16 } else { size.rows }
+    val cols = if size.cols == 0 { 80u16 } else { size.cols }
+
+    val filename = if args.len() > 0 { args[0] } else { "untitled.txt" }
+    val ed = editor_new(filename, rows, cols)
+
+    // Main loop: render frame, then dispatch one key
+    while ed.running {
+        val out = render_to_string(ed)
+        match session.write_str(out) {
+            Ok(_) => {},
+            Err(e) => { eprint("ERR: write " + e.msg + "\r\n"); return }
+        }
+        val key = session.read_key()
+        dispatch_key(ed, key)
+    }
+    // Exit message
+    eprint("Goodbye.\r\n")
+}
+
+// Route a decoded Key to the appropriate handler based on editor state.
+// In prompt mode (search/rename), keys go to prompt handling.
+// Otherwise, they go to the standard EditorCommands dispatch.
+fun dispatch_key(ed: Editor, key: Key): void {
+    match ed.prompt_mode {
+        PromptSearch => {
+            dispatch_prompt_key(ed, key)
+            return
+        },
+        PromptRename => {
+            dispatch_prompt_key(ed, key)
+            return
+        },
+        _ => {}
+    }
+
+    // ── Normal mode: use EditorCommands dispatch ──
+    handle_key(ed, key)
+}
+
+// Prompt mode key handling (search / rename).
+// Limited key set: editing chars, Enter to confirm, ESC to cancel,
+// Ctrl+Q to quit, Backspace to delete.
+fun dispatch_prompt_key(ed: Editor, key: Key): void {
+    match key {
+        CharacterKey(ch) => { editor_prompt_insert_char(ed, ch); },
+        BackspaceKey => { editor_prompt_backspace(ed); },
+        EnterKey => { editor_confirm_prompt(ed); },
+        EscapeKey => { editor_cancel_prompt(ed); },
+        ControlKey(b) => {
+            if b == 0x11u8 {  // Ctrl+Q: quit even in prompt mode
+                ed.running = false
+            }
+        },
+        _ => {}
+    }
+}

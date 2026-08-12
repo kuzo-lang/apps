@@ -1,0 +1,383 @@
+// GapBuffer.kz — gap buffer text storage with line view cache
+//
+// Memory layout:
+//   buffer[0..gap_start)          = text before cursor
+//   buffer[gap_start..gap_end)    = gap (free space)
+//   buffer[gap_end..buffer.len()) = text after cursor
+//
+// line_ranges stores each line's [start, end) in logical byte offsets
+// (treating the gap as non-existent). Lazy invalidation: edits set lines_dirty,
+// line queries trigger rebuild on first access.
+
+import std.terminal.Ansi
+
+// LineRange: a line's [start, end) logical byte offset pair
+type LineRange = LineRange(
+    start: usize,
+    end: usize
+)
+
+// LineColumn: cursor position expressed as (line, column)
+type LineColumn = LineColumn(
+    line: usize,
+    column: usize
+)
+
+// GapBuffer: gap buffer text storage
+type GapBuffer = GapBuffer(
+    buffer: u8[],
+    gap_start: usize,
+    gap_end: usize,
+    line_ranges: LineRange[],   // each line's [start, end) logical byte offset
+    lines_dirty: bool            // set true after edits, rebuilt on next line query
+) {
+    // ─── Queries ───
+    pub fun text_byte_length(): usize {
+        this.gap_start + (this.buffer.len() - this.gap_end)
+    }
+    pub fun cursor_byte_offset(): usize { this.gap_start }
+    pub fun gap_free_size(): usize { this.gap_end - this.gap_start }
+
+    // ─── Gap movement (byte-level primitive) ───
+    pub fun &move_gap_to(target_offset: usize): void {
+        if target_offset == this.gap_start { return }
+        if target_offset > this.gap_start {
+            // right shift: move bytes from right half head to left half tail
+            val k = target_offset - this.gap_start
+            if this.gap_end + k > this.buffer.len() {
+                // clamp to end
+                val actual = this.buffer.len() - this.gap_end
+                var i: usize = 0
+                while i < actual {
+                    this.buffer[this.gap_start + i] = this.buffer[this.gap_end + i]
+                    i = i + 1
+                }
+                this.gap_start = this.gap_start + actual
+                this.gap_end = this.buffer.len()
+                return
+            }
+            var i: usize = 0
+            while i < k {
+                this.buffer[this.gap_start + i] = this.buffer[this.gap_end + i]
+                i = i + 1
+            }
+            this.gap_start = this.gap_start + k
+            this.gap_end = this.gap_end + k
+        } else {
+            // left shift: move bytes from left half tail to right half head
+            val k = this.gap_start - target_offset
+            var i: usize = 0
+            while i < k {
+                this.buffer[this.gap_end - 1 - i] = this.buffer[this.gap_start - 1 - i]
+                i = i + 1
+            }
+            this.gap_start = this.gap_start - k
+            this.gap_end = this.gap_end - k
+        }
+    }
+
+    // ─── UTF-8 char-level movement ───
+    pub fun &move_cursor_left_char(): void {
+        if this.gap_start == 0 { return }
+        // scan backward for non-continuation byte
+        var i: usize = this.gap_start
+        i = i - 1
+        while i > 0 && (this.buffer[i] & 0xC0u8) == 0x80u8 {
+            i = i - 1
+        }
+        // if i==0 and it's a continuation byte, stay at 0
+        if (this.buffer[i] & 0xC0u8) == 0x80u8 {
+            this.move_gap_to(0)
+        } else {
+            this.move_gap_to(i)
+        }
+    }
+    pub fun &move_cursor_right_char(): void {
+        if this.gap_end >= this.buffer.len() { return }
+        val char_len = this.utf8_char_len_at(this.gap_end)
+        this.move_gap_to(this.gap_start + char_len)
+    }
+
+    // ─── Line-level movement ───
+    pub fun &move_cursor_to_line_start(): void {
+        if this.gap_start == 0 { return }
+        var i = this.gap_start
+        while i > 0 && this.buffer[i - 1] != 0x0Au8 {
+            i = i - 1
+        }
+        this.move_gap_to(i)
+    }
+    pub fun &move_cursor_to_line_end(): void {
+        var i = this.gap_end
+        while i < this.buffer.len() && this.buffer[i] != 0x0Au8 {
+            i = i + 1
+        }
+        // i is logical offset of line end; convert to physical
+        this.move_gap_to(this.gap_start + (i - this.gap_end))
+    }
+    pub fun &move_cursor_line_up(): void {
+        val lc = this.offset_to_line_column(this.gap_start)
+        if lc.line == 0 {
+            this.move_gap_to(0)
+            return
+        }
+        val prev_start = this.line_start_offset(lc.line - 1)
+        val cur_start = this.line_start_offset(lc.line)
+        val prev_len = cur_start - prev_start
+        val target_col = if lc.column < prev_len { lc.column } else { prev_len }
+        this.move_gap_to(prev_start + target_col)
+    }
+    pub fun &move_cursor_line_down(): void {
+        val lc = this.offset_to_line_column(this.gap_start)
+        val total = this.line_count()
+        if lc.line + 1 >= total {
+            this.move_gap_to(this.text_byte_length())
+            return
+        }
+        val cur_start = this.line_start_offset(lc.line)
+        val next_start = this.line_start_offset(lc.line + 1)
+        val next_end = if lc.line + 2 < total { this.line_start_offset(lc.line + 2) } else { this.text_byte_length() }
+        val next_len = next_end - next_start
+        val target_col = if lc.column < next_len { lc.column } else { next_len }
+        this.move_gap_to(next_start + target_col)
+    }
+    pub fun &move_cursor_to(line: usize, column: usize): void {
+        val total = this.line_count()
+        val target_line = if line >= total { total - 1 } else { line }
+        val line_start = this.line_start_offset(target_line)
+        val line_end = if target_line + 1 < total { this.line_start_offset(target_line + 1) } else { this.text_byte_length() }
+        val line_len = line_end - line_start
+        val target_col = if column > line_len { line_len } else { column }
+        this.move_gap_to(line_start + target_col)
+    }
+
+    // ─── Editing ───
+    pub fun &insert_byte(byte: u8): void {
+        this.ensure_gap_capacity(1)
+        this.buffer[this.gap_start] = byte
+        this.gap_start = this.gap_start + 1
+        this.lines_dirty = true
+    }
+    pub fun &insert_bytes(bytes: u8[]): void {
+        this.ensure_gap_capacity(bytes.len())
+        var i: usize = 0
+        while i < bytes.len() {
+            this.buffer[this.gap_start + i] = bytes[i]
+            i = i + 1
+        }
+        this.gap_start = this.gap_start + bytes.len()
+        this.lines_dirty = true
+    }
+    pub fun &insert_string(text: str): void {
+        this.insert_bytes(text.bytes())
+    }
+    pub fun &delete_byte_backward(): void {
+        if this.gap_start == 0 { return }
+        this.gap_start = this.gap_start - 1
+        this.lines_dirty = true
+    }
+    pub fun &delete_byte_forward(): void {
+        if this.gap_end >= this.buffer.len() { return }
+        this.gap_end = this.gap_end + 1
+        this.lines_dirty = true
+    }
+    // Delete previous complete UTF-8 character (handles multi-byte)
+    pub fun &delete_char_backward(): void {
+        if this.gap_start == 0 { return }
+        val inner = this.buffer
+        var i = this.gap_start
+        i = i - 1
+        // Scan backward over continuation bytes (0x80-0xBF)
+        while i > 0 && (inner[i] & 0xC0u8) == 0x80u8 {
+            i = i - 1
+        }
+        this.gap_start = i
+        this.lines_dirty = true
+    }
+    // Delete next complete UTF-8 character (handles multi-byte)
+    pub fun &delete_char_forward(): void {
+        if this.gap_end >= this.buffer.len() { return }
+        val inner = this.buffer
+        val b = inner[this.gap_end]
+        var step: usize = 1
+        if b >= 0xF0u8 { step = 4 }
+        else if b >= 0xE0u8 { step = 3 }
+        else if b >= 0xC0u8 { step = 2 }
+        this.gap_end = this.gap_end + step
+        this.lines_dirty = true
+    }
+
+    // ─── Line view (cached) ───
+    pub fun &line_count(): usize {
+        this.ensure_lines_fresh()
+        this.line_ranges.len()
+    }
+    pub fun &line_start_offset(line_index: usize): usize {
+        this.ensure_lines_fresh()
+        if line_index >= this.line_ranges.len() { return this.text_byte_length() }
+        this.line_ranges[line_index].start
+    }
+    pub fun &line_text(line_index: usize): str {
+        this.ensure_lines_fresh()
+        val ranges = this.line_ranges
+        if line_index >= ranges.len() { return "" }
+        val range = ranges[line_index]
+        val start = range.start
+        val end = range.end
+        if start >= end { return "" }
+        val len = end - start
+        val bytes: u8[] = [0u8, ..len]
+        val buf = this.buffer
+        val gs = this.gap_start
+        val ge = this.gap_end
+        var i: usize = 0
+        while i < len {
+            val loff = start + i
+            val phys = if loff < gs { loff } else { loff + (ge - gs) }
+            bytes[i] = buf[phys]
+            i = i + 1
+        }
+        cast(bytes).to(str)
+    }
+    pub fun &offset_to_line_column(offset: usize): LineColumn {
+        this.ensure_lines_fresh()
+        var line: usize = 0
+        for range in this.line_ranges.iter() {
+            // offset within [start, end] (inclusive of end for cursor at line end)
+            if offset >= range.start && offset <= range.end {
+                return LineColumn(line, offset - range.start)
+            }
+            // offset at the newline position (end+1 == next line start)
+            if offset <= range.end {
+                return LineColumn(line, offset - range.start)
+            }
+            line = line + 1
+        }
+        // offset beyond last line
+        val last = this.line_ranges.len()
+        if last == 0 { return LineColumn(0, 0) }
+        val last_range = this.line_ranges[last - 1]
+        LineColumn(last - 1, last_range.end - last_range.start)
+    }
+
+    // ─── Export ───
+    pub fun to_bytes(): u8[] {
+        val gs = this.gap_start
+        val ge = this.gap_end
+        val buf = this.buffer
+        val buf_len = buf.len()
+        val text_len = gs + (buf_len - ge)
+        val result: u8[] = [0u8, ..text_len]
+        var i: usize = 0
+        while i < gs {
+            result[i] = buf[i]
+            i = i + 1
+        }
+        var j: usize = ge
+        while j < buf_len {
+            result[i] = buf[j]
+            i = i + 1
+            j = j + 1
+        }
+        result
+    }
+    pub fun to_string(): str {
+        cast(this.to_bytes()).to(str)
+    }
+
+    // ─── Internal ───
+    fun &ensure_gap_capacity(needed: usize): void {
+        if this.gap_end - this.gap_start >= needed { return }
+        val text_len = this.text_byte_length()
+        val new_capacity = if this.buffer.len() * 2 > text_len + needed + 256 {
+            this.buffer.len() * 2
+        } else {
+            text_len + needed + 256
+        }
+        val new_buffer: u8[] = [0u8, ..new_capacity]
+        var i: usize = 0
+        while i < this.gap_start {
+            new_buffer[i] = this.buffer[i]
+            i = i + 1
+        }
+        val new_gap_end = new_capacity - (this.buffer.len() - this.gap_end)
+        var j: usize = this.gap_end
+        var k: usize = new_gap_end
+        while j < this.buffer.len() {
+            new_buffer[k] = this.buffer[j]
+            j = j + 1
+            k = k + 1
+        }
+        this.buffer = new_buffer
+        this.gap_end = new_gap_end
+    }
+
+    fun &ensure_lines_fresh(): void {
+        if !this.lines_dirty { return }
+        val text_len = this.gap_start + (this.buffer.len() - this.gap_end)
+        val gap_start = this.gap_start
+        val gap_end = this.gap_end
+        val buf = this.buffer
+        // first pass: count lines
+        var count: usize = 1
+        var phys: usize = 0
+        var logical: usize = 0
+        while logical < text_len {
+            val byte = buf[phys]
+            if byte == 0x0Au8 { count = count + 1 }
+            phys = phys + 1
+            if phys == gap_start { phys = gap_end }
+            logical = logical + 1
+        }
+        // second pass: fill line_ranges via local array
+        var ranges: LineRange[] = [LineRange(0usize, 0usize), ..count]
+        var line_idx: usize = 0
+        var line_start: usize = 0
+        phys = 0
+        logical = 0
+        while logical < text_len {
+            val byte = buf[phys]
+            if byte == 0x0Au8 {
+                ranges[line_idx] = LineRange(line_start, logical)
+                line_idx = line_idx + 1
+                line_start = logical + 1
+            }
+            phys = phys + 1
+            if phys == gap_start { phys = gap_end }
+            logical = logical + 1
+        }
+        ranges[line_idx] = LineRange(line_start, text_len)
+        this.line_ranges = ranges
+        this.lines_dirty = false
+    }
+
+    fun logical_to_physical(loff: usize): usize {
+        if loff < this.gap_start { loff }
+        else { loff + (this.gap_end - this.gap_start) }
+    }
+
+    fun utf8_char_len_at(phys: usize): usize {
+        val byte = this.buffer[phys]
+        if byte < 0x80u8 { 1usize }
+        else if (byte & 0xE0u8) == 0xC0u8 { 2usize }
+        else if (byte & 0xF0u8) == 0xE0u8 { 3usize }
+        else if (byte & 0xF8u8) == 0xF0u8 { 4usize }
+        else { 1usize }
+    }
+}
+
+// ─── Constructors (top-level functions) ───
+pub fun gap_buffer_new(initial_capacity: usize): GapBuffer {
+    val cap = if initial_capacity < 256 { 256usize } else { initial_capacity }
+    val buf: u8[] = [0u8, ..cap]
+    val ranges: LineRange[] = [LineRange(0usize, 0usize)]
+    GapBuffer(buf, 0usize, cap, ranges, false)
+}
+pub fun gap_buffer_from_bytes(bytes: u8[]): GapBuffer {
+    val gb = gap_buffer_new(bytes.len() + 256)
+    gb.insert_bytes(bytes)
+    gb
+}
+pub fun gap_buffer_from_string(text: str): GapBuffer {
+    gap_buffer_from_bytes(text.bytes())
+}
