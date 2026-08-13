@@ -104,12 +104,12 @@ pub fun editor_save_file(ed: Editor): bool {
         ed.status_message = "save failed: write error"
         return false
     }
-    if cast(written).to(usize) < len {
+    if written as usize < len {
         ed.status_message = "save failed: incomplete write"
         return false
     }
     ed.dirty = false
-    ed.status_message = "saved " + cast(len).to(str) + " bytes"
+    ed.status_message = "saved " + (len as str) + " bytes"
     true
 }
 
@@ -128,8 +128,8 @@ pub fun editor_load_file(ed: Editor, path: str): bool {
     loop {
         val n = __file_read_into(fd, chunk, 4096)
         if n <= 0 { break }
-        val slice = chunk[0..cast(n).to(usize)]
-        content = content + cast(slice).to(str)
+        val slice = chunk[0..n as usize]
+        content = content + (slice as str)
     }
     __file_close_raw(fd)
     ed.filename = path
@@ -142,7 +142,7 @@ pub fun editor_load_file(ed: Editor, path: str): bool {
     ed.scroll_offset = 0
     ed.scroll_col = 0
     editor_sync_cursor(ed)
-    ed.status_message = "loaded " + cast(content.bytes().len()).to(str) + " bytes"
+    ed.status_message = "loaded " + (content.bytes().len() as str) + " bytes"
     true
 }
 
@@ -236,7 +236,7 @@ pub fun editor_page_down(ed: Editor): void {
 
 // Page step = text area height - 1 (keep one line of context visible).
 fun page_step(ed: Editor): usize {
-    val rows_u = cast(ed.rows).to(usize)
+    val rows_u = ed.rows as usize
     if rows_u > 2 { rows_u - 2 } else { 1 }
 }
 
@@ -387,7 +387,7 @@ fun editor_sync_cursor(ed: Editor): void {
 
 // Adjust scroll_offset so the given line is visible.
 pub fun editor_ensure_visible(ed: Editor, line: usize): void {
-    val rows_u = cast(ed.rows).to(usize)
+    val rows_u = ed.rows as usize
     val text_rows = if rows_u > 1 { rows_u - 1 } else { 1 }
     val off = ed.scroll_offset
     if line < off {
@@ -401,7 +401,7 @@ pub fun editor_ensure_visible(ed: Editor, line: usize): void {
 // (after accounting for the gutter width).
 pub fun editor_ensure_column_visible(ed: Editor, column: usize): void {
     val gw = gutter_width(ed)
-    val cols_u = cast(ed.cols).to(usize)
+    val cols_u = ed.cols as usize
     if cols_u <= gw { return }
     val text_cols = cols_u - gw
     val sc = ed.scroll_col
@@ -439,12 +439,12 @@ fun basename(path: str): str {
     var i: usize = 0
     while i < len {
         if bytes[i] == 0x2Fu8 { // '/'
-            last_slash = cast(i).to(i64)
+            last_slash = i as i64
         }
         i = i + 1
     }
     if last_slash < 0 { return path }
-    val start = cast(last_slash + 1).to(usize)
+    val start = (last_slash + 1) as usize
     substring(bytes, start, len)
 }
 
@@ -456,12 +456,12 @@ fun dirname(path: str): str {
     var i: usize = 0
     while i < len {
         if bytes[i] == 0x2Fu8 { // '/'
-            last_slash = cast(i).to(i64)
+            last_slash = i as i64
         }
         i = i + 1
     }
     if last_slash < 0 { return "" }
-    val end = cast(last_slash + 1).to(usize)
+    val end = (last_slash + 1) as usize
     substring(bytes, 0, end)
 }
 
@@ -484,7 +484,7 @@ pub fun editor_start_rename(ed: Editor): void {
 pub fun editor_prompt_insert_char(ed: Editor, ch: u8): void {
     // only accept printable chars
     if ch >= 0x20u8 && ch <= 0x7Eu8 {
-        ed.prompt_text = ed.prompt_text + cast([ch]).to(str)
+        ed.prompt_text = ed.prompt_text + ([ch] as str)
     }
 }
 
@@ -623,7 +623,7 @@ fun parse_usize(s: str): usize {
     while i < len {
         val b = bytes[i]
         if b < 0x30u8 || b > 0x39u8 { return 0 }
-        result = result * 10 + cast(b - 0x30u8).to(usize)
+        result = result * 10 + (b - 0x30u8) as usize
         i = i + 1
     }
     result
@@ -638,5 +638,5 @@ fun substring(bytes: u8[], start: usize, end: usize): str {
         out[i] = bytes[start + i]
         i = i + 1
     }
-    cast(out).to(str)
+    out as str
 }

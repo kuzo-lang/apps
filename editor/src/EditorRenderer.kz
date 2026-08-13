@@ -27,10 +27,10 @@ pub fun render_to_string(ed: Editor): str {
     out = out + screen_clear_and_home()
 
     val total = ed.buffer.line_count()
-    val rows_u = cast(ed.rows).to(usize)
+    val rows_u = ed.rows as usize
     val text_rows = if rows_u > 1 { rows_u - 1 } else { 1 }
     val gw = gutter_width(ed)
-    val cols_u = cast(ed.cols).to(usize)
+    val cols_u = ed.cols as usize
     val text_cols = if cols_u > gw { cols_u - gw } else { 1 }
     val scroll_off = ed.scroll_offset
     val scroll_col = ed.scroll_col
@@ -124,7 +124,7 @@ pub fun render_line_highlighted(line: str, start_col: usize, max_cols: usize): s
 // Format line number right-justified in (width - 1) chars, plus a space separator.
 // Example: width=4, line=1 → "  1 "
 fun format_line_number(line_num: usize, width: usize): str {
-    val num_str = cast(line_num).to(str)
+    val num_str = line_num as str
     val num_len = num_str.bytes().len()
     val pad_count = if num_len < width - 1 { width - 1 - num_len } else { 0 }
     var pad: str = ""
@@ -166,8 +166,8 @@ fun build_status_bar(ed: Editor): str {
                 s = s + "          "
             }
             val total = ed.buffer.line_count()
-            s = s + "  line " + cast(ed.cursor_line + 1).to(str) + "/" + cast(total).to(str)
-            s = s + "  col " + cast(ed.cursor_column + 1).to(str)
+            s = s + "  line " + (ed.cursor_line + 1) as str + "/" + (total as str)
+            s = s + "  col " + (ed.cursor_column + 1) as str
             if ed.status_message.len() > 0 {
                 s = s + "  " + ed.status_message
             }
@@ -176,7 +176,7 @@ fun build_status_bar(ed: Editor): str {
         }
     }
     // pad to fill row width
-    val cols_u = cast(ed.cols).to(usize)
+    val cols_u = ed.cols as usize
     val s_bytes = s.bytes()
     if s_bytes.len() < cols_u {
         val pad = cols_u - s_bytes.len()
@@ -191,5 +191,5 @@ fun build_status_bar(ed: Editor): str {
 
 // usize → u16 helper (via i64 intermediate, see Cast.kz conversion chain)
 fun to_u16(n: usize): u16 {
-    cast(cast(n).to(i64)).to(u16)
+    n as i64 as u16
 }

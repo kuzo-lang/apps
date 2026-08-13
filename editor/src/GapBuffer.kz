@@ -237,7 +237,7 @@ type GapBuffer = GapBuffer(
             bytes[i] = buf[phys]
             i = i + 1
         }
-        cast(bytes).to(str)
+        bytes as str
     }
     pub fun &offset_to_line_column(offset: usize): LineColumn {
         this.ensure_lines_fresh()
@@ -282,7 +282,7 @@ type GapBuffer = GapBuffer(
         result
     }
     pub fun to_string(): str {
-        cast(this.to_bytes()).to(str)
+        this.to_bytes() as str
     }
 
     // ─── Internal ───

@@ -226,7 +226,7 @@ fun is_keyword(w: str): bool {
     w == "if" || w == "else" || w == "while" || w == "for" || w == "return" ||
     w == "break" || w == "continue" || w == "import" || w == "pub" ||
     w == "throw" || w == "catch" || w == "defer" || w == "async" || w == "await" ||
-    w == "cast" || w == "trait" || w == "impl" || w == "where" || w == "extern" ||
+    w == "trait" || w == "impl" || w == "where" || w == "extern" ||
     w == "true" || w == "false" || w == "void" || w == "null" || w == "in" ||
     w == "and" || w == "or" || w == "not" || w == "as" || w == "is"
 }
@@ -255,5 +255,5 @@ pub fun substring(bytes: u8[], start: usize, end: usize): str {
         out[i] = bytes[start + i]
         i = i + 1
     }
-    cast(out).to(str)
+    out as str
 }
