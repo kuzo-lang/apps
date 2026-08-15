@@ -4,13 +4,22 @@ import Editor
 import EditorCommands
 import EditorRenderer
 import std.terminal.Session
+import std.os.Tty
 import std.terminal.Key
 import std.terminal.Ansi
 
 fun main(args: str[]): void {
     val session = match enter_raw_mode() {
         Ok(s) => s,
-        Err(e) => { eprint("ERR: raw " + e.msg + "\r\n"); return }
+        Err(e) => {
+            if !Tty.is_tty(0) {
+                eprint("error: stdin is not a terminal\r\n")
+                eprint("hint: run the editor in a real terminal (Windows Terminal / PowerShell / conhost)\r\n")
+                eprint("       piping stdin (e.g. from a script or Git Bash mintty) is not supported\r\n")
+            } else {
+                eprint("ERR: raw " + e.msg + "\r\n")
+            }
+            return }
     }
     defer session.exit_raw_mode()
 

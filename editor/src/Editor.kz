@@ -8,6 +8,8 @@
 // Instead they call top-level editor_* functions with this as the first arg.
 
 import GapBuffer
+import std.io.Fs
+import std.io.File
 
 // LineColumn: cursor position as (line, column)
 type LineColumn = LineColumn(
@@ -85,53 +87,36 @@ pub fun editor_from_string(filename: str, content: str, rows: u16, cols: u16): E
 
 // ─── File I/O ───
 
-// Save buffer to ed.filename using sync raw file I/O.
-// flags: OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE = 2 | 4 | 8 = 14
-// mode: 0o644 (rw-r--r--)
+// Save buffer to ed.filename via the std one-shot byte writer
+// (create + truncate semantics, matching the old OPEN_WRITE|OPEN_CREATE|OPEN_TRUNCATE flags).
 // Returns true on success; sets status_message with result.
 pub fun editor_save_file(ed: Editor): bool {
     val path = ed.filename
-    val fd = __file_open_raw(path, 14, 0o644)
-    if fd < 0 {
-        ed.status_message = "save failed: cannot open " + path
-        return false
-    }
     val bytes = ed.buffer.to_bytes()
     val len = bytes.len()
-    val written = __file_write(fd, bytes, len)
-    __file_close_raw(fd)
-    if written < 0 {
-        ed.status_message = "save failed: write error"
-        return false
+    match Fs.write_file_bytes(path, bytes).await() {
+        Ok(_) => {
+            ed.dirty = false
+            ed.status_message = "saved " + (len as str) + " bytes"
+            true
+        },
+        Err(e) => {
+            ed.status_message = "save failed: " + e.msg
+            false
+        },
     }
-    if written as usize < len {
-        ed.status_message = "save failed: incomplete write"
-        return false
-    }
-    ed.dirty = false
-    ed.status_message = "saved " + (len as str) + " bytes"
-    true
 }
 
 // Load file content from path into the editor buffer.
 // Returns true on success; sets status_message with result.
 pub fun editor_load_file(ed: Editor, path: str): bool {
-    // flags: OPEN_READ = 1
-    val fd = __file_open_raw(path, 1, 0)
-    if fd < 0 {
-        ed.status_message = "load failed: cannot open " + path
-        return false
+    val content = match Fs.read_file(path).await() {
+        Ok(s) => s,
+        Err(e) => {
+            ed.status_message = "load failed: " + e.msg
+            return false
+        },
     }
-    // Read in chunks into a string accumulator (amortized O(n), avoids O(n^2) of u8[] ++).
-    var content: str = ""
-    val chunk: u8[] = [0u8, ..4096]
-    loop {
-        val n = __file_read_into(fd, chunk, 4096)
-        if n <= 0 { break }
-        val slice = chunk[0..n as usize]
-        content = content + (slice as str)
-    }
-    __file_close_raw(fd)
     ed.filename = path
     ed.buffer = gap_buffer_from_string(content)
     ed.undo_stack = []
@@ -526,13 +511,15 @@ pub fun editor_confirm_prompt(ed: Editor): void {
                     editor_save_file(ed)
                 }
                 // Try to rename the actual file
-                val rc = __file_rename_raw(old_path, new_path)
-                if rc < 0 {
-                    ed.status_message = "rename failed: cannot rename file"
-                } else {
-                    ed.filename = new_path
-                    ed.dirty = true // Content changed relative to new file
-                    ed.status_message = "renamed to: " + new_name
+                match File.rename(old_path, new_path).await() {
+                    Ok(_) => {
+                        ed.filename = new_path
+                        ed.dirty = true // Content changed relative to new file
+                        ed.status_message = "renamed to: " + new_name
+                    },
+                    Err(_) => {
+                        ed.status_message = "rename failed: cannot rename file"
+                    },
                 }
             }
         },

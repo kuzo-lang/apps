@@ -92,7 +92,7 @@ pub fun render_line_highlighted(line: str, start_col: usize, max_cols: usize): s
             if ws_start < ws_end && ws_start < len {
                 val actual_end = if ws_end > len { len } else { ws_end }
                 if ws_start < actual_end {
-                    result = result + substring(bytes, ws_start, actual_end)
+                    result = result + EditorHighlight.substring(bytes, ws_start, actual_end)
                 }
             }
         }
@@ -103,7 +103,7 @@ pub fun render_line_highlighted(line: str, start_col: usize, max_cols: usize): s
             val actual_end = if tok_end > len { len } else { tok_end }
             if tok_start < actual_end {
                 result = result + kind_to_color(tok.kind)
-                result = result + substring(bytes, tok_start, actual_end)
+                result = result + EditorHighlight.substring(bytes, tok_start, actual_end)
                 result = result + reset()
             }
         }
@@ -115,7 +115,7 @@ pub fun render_line_highlighted(line: str, start_col: usize, max_cols: usize): s
         val trail_start = if pos < start_col { start_col } else { pos }
         val trail_end = if len > end_col { end_col } else { len }
         if trail_start < trail_end {
-            result = result + substring(bytes, trail_start, trail_end)
+            result = result + EditorHighlight.substring(bytes, trail_start, trail_end)
         }
     }
     result
