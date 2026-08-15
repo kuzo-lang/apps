@@ -1,0 +1,282 @@
+// Term.kz — terminal session via the builtin Lib FFI (editor-local)
+//
+// Replaces the deleted std.terminal.Session/Raw stack. Everything here is plain
+// Lib.open/lookup/call against system libraries — no compiler terminal support.
+//
+// Platform routes:
+//   windows: kernel32.dll (console APIs) + msvcrt.dll (malloc scratch)
+//   posix:   libc.so.6 (linux) / libSystem.B.dylib (macos) — cfmakeraw route
+//
+// Signature tricks the calls rely on (Marshal expands `u8[]` into the two slots
+// ptr+len and C callees ignore trailing extra argument slots):
+//   GetConsoleMode(h, LPDWORD)          sig "u64, u8[]"        — mode written
+//                                        back into the 4-byte array
+//   GetConsoleScreenBufferInfo(h, buf)  sig "u64, u8[]"        — 22-byte struct
+//   ReadFile/WriteFile(h, buf, n, pCnt, NULL) sig "u64, u8[], u64, u64"
+//                                        — buflen covers n, the malloc'd
+//                                          scratch pointer satisfies the
+//                                          mandatory pCount out-param, 0 = NULL
+//                                          overlapped
+//   read/write(fd, buf, count)          sig "i32, u8[]"        — exact match
+//   tcgetattr/tcsetattr/ioctl           sig "..., u8[]"        — extra len slot
+//   cfmakeraw(termios*)                 sig "u8[]"             — in-place via
+//                                        writeback
+//
+// ESC disambiguation: after a lone ESC byte, follow-up bytes are consumed only
+// while more input is already pending (GetNumberOfConsoleInputEvents on
+// windows, a temporary O_NONBLOCK fcntl flip on posix) so a standalone ESC
+// resolves as EscapeKey instead of blocking the reader forever.
+
+import Key
+import std.os.Info
+
+// Terminal dimensions (rows × columns).
+type TermSize = TermSize(
+    rows: u16,
+    cols: u16
+)
+
+// Term: an open raw-mode terminal session. Fields marked (win)/(posix) are only
+// meaningful on that platform but are always populated so one record shape
+// serves both.
+type Term = Term(
+    is_win: bool,
+    lib_main: Lib,          // kernel32 / libc
+    lib_c: Lib,             // msvcrt / same as lib_main
+    h_in: u64,              // (win) stdin console handle
+    h_out: u64,             // (win) stdout console handle
+    f_set_mode: ForeignFn<i32>,  // SetConsoleMode / tcsetattr
+    f_size: ForeignFn<i32>,      // GetConsoleScreenBufferInfo / ioctl
+    f_pending: ForeignFn<i32>,   // GetNumberOfConsoleInputEvents / fcntl
+    f_read: ForeignFn<i32>,      // ReadFile / read
+    f_write: ForeignFn<i32>,     // WriteFile / write
+    f_free: ForeignFn<i32>,      // (win) free — releases scratch
+    scratch: u64,               // (win) malloc'd out-param scratch
+    saved: u8[]                 // original console mode / termios bytes
+)
+
+// ── little-endian decode helpers ──
+
+fun le16(b: u8[], i: usize): u16 {
+    (b[i]) as u16 + ((b[i + 1]) as u16 << 8)
+}
+
+fun le32(b: u8[]): u32 {
+    (b[0]) as u32 + ((b[1]) as u32 << 8) + ((b[2]) as u32 << 16) + ((b[3]) as u32 << 24)
+}
+
+// ── open / close ──
+
+// Open a raw-mode terminal session on stdin/stdout.
+// Defer term_close() to restore the original mode.
+pub fun term_open(): Throw<Term, FfiError> {
+    if os_name() == "windows" {
+        term_open_win()
+    } else {
+        term_open_posix()
+    }
+}
+
+fun term_open_win(): Throw<Term, FfiError> {
+    val k32 = Lib.open("kernel32.dll")?
+    val crt = Lib.open("msvcrt.dll")?
+
+    // Handles: STD_INPUT_HANDLE=-10, STD_OUTPUT_HANDLE=-11
+    val f_sh: ForeignFn<u64> = k32.lookup("GetStdHandle", "i32")?
+    val h_in = f_sh.call(-10i32)?
+    val h_out = f_sh.call(-11i32)?
+
+    // Save the current input mode, then switch to raw + VT input:
+    // clear ECHO|LINE|PROCESSED_INPUT (0x7), set ENABLE_VIRTUAL_TERMINAL_INPUT
+    // (0x200) so arrow/edit/function keys arrive as ESC[A-style sequences.
+    val f_gm: ForeignFn<i32> = k32.lookup("GetConsoleMode", "u64, u8[]")?
+    val mode_buf: u8[] = [0u8, ..4]
+    if f_gm.call(h_in, mode_buf)? == 0 {
+        throw FfiError(Other, "GetConsoleMode failed (stdin is not a console?)")
+    }
+    val mode = le32(mode_buf)
+    val f_sm: ForeignFn<i32> = k32.lookup("SetConsoleMode", "u64, u32")?
+    if f_sm.call(h_in, (mode & 4294967288u32) | 512u32)? == 0 {
+        throw FfiError(Other, "SetConsoleMode failed")
+    }
+
+    // ReadFile/WriteFile demand a writable count pointer even when the count is
+    // ignored: rent 4 bytes for the whole session.
+    val f_malloc: ForeignFn<u64> = crt.lookup("malloc", "usize")?
+    val scratch = f_malloc.call(4 as usize)?
+
+    val f_size: ForeignFn<i32> = k32.lookup("GetConsoleScreenBufferInfo", "u64, u8[]")?
+    val f_pending: ForeignFn<i32> = k32.lookup("GetNumberOfConsoleInputEvents", "u64, u8[]")?
+    val f_read: ForeignFn<i32> = k32.lookup("ReadFile", "u64, u8[], u64, u64")?
+    val f_write: ForeignFn<i32> = k32.lookup("WriteFile", "u64, u8[], u64, u64")?
+    val f_free: ForeignFn<i32> = crt.lookup("free", "*u8")?
+
+    Ok(Term(true, k32, crt, h_in, h_out, f_sm, f_size, f_pending, f_read, f_write, f_free, scratch, mode_buf))
+}
+
+fun term_open_posix(): Throw<Term, FfiError> {
+    val libc = if os_name() == "macos" {
+        Lib.open("libSystem.B.dylib")?
+    } else {
+        Lib.open("libc.so.6")?
+    }
+
+    // termios is ~52 (linux) / ~60 (macos) bytes; 128 covers both.
+    val orig: u8[] = [0u8, ..128]
+    val f_gm: ForeignFn<i32> = libc.lookup("tcgetattr", "i32, u8[]")?
+    if f_gm.call(0i32, orig)? != 0 {
+        throw FfiError(Other, "tcgetattr failed (stdin is not a tty?)")
+    }
+
+    // cfmakeraw on a copy (writeback mutates in place), then apply with
+    // TCSAFLUSH. cfmakeraw leaves VMIN=1/VTIME=0 → blocking single-byte reads.
+    val work: u8[] = orig[0..128]
+    val f_raw: ForeignFn<i32> = libc.lookup("cfmakeraw", "u8[]")?
+    f_raw.call(work)?
+    val f_sm: ForeignFn<i32> = libc.lookup("tcsetattr", "i32, i32, u8[]")?
+    if f_sm.call(0i32, 2i32, work)? != 0 {
+        throw FfiError(Other, "tcsetattr failed")
+    }
+
+    val f_size: ForeignFn<i32> = libc.lookup("ioctl", "i32, u64, u8[]")?
+    val f_pending: ForeignFn<i32> = libc.lookup("fcntl", "i32, i32, i64")?
+    val f_read: ForeignFn<i32> = libc.lookup("read", "i32, u8[]")?
+    val f_write: ForeignFn<i32> = libc.lookup("write", "i32, u8[]")?
+    val f_free: ForeignFn<i32> = libc.lookup("free", "*u8")?
+
+    Ok(Term(false, libc, libc, 0u64, 0u64, f_sm, f_size, f_pending, f_read, f_write, f_free, 0u64, orig))
+}
+
+// Restore the original terminal mode. Best effort: mode restoration errors do
+// not propagate, the session is torn down regardless.
+pub fun term_close(t: Term): Throw<void, FfiError> {
+    if t.is_win {
+        val r_restore = t.f_set_mode.call(t.h_in, le32(t.saved))
+        val r_free = t.f_free.call(t.scratch)
+    } else {
+        val r_restore = t.f_set_mode.call(0i32, 2i32, t.saved)
+    }
+    t.lib_main.close()
+    t.lib_c.close()
+    Ok(void)
+}
+
+// ── size ──
+
+pub fun term_get_size(t: Term): Throw<TermSize, FfiError> {
+    val buf: u8[] = [0u8, ..40]
+    if t.is_win {
+        if t.f_size.call(t.h_out, buf)? == 0 {
+            throw FfiError(Other, "GetConsoleScreenBufferInfo failed")
+        }
+        // CONSOLE_SCREEN_BUFFER_INFO: srWindow SMALL_RECT at byte offset 10
+        // (Left,Top,Right,Bottom as 4 × little-endian i16).
+        val left = le16(buf, 10)
+        val top = le16(buf, 12)
+        val right = le16(buf, 14)
+        val bottom = le16(buf, 16)
+        return Ok(TermSize(bottom - top + 1, right - left + 1))
+    }
+    // ioctl(fd=1, TIOCGWINSZ, &ws): ws_row@0, ws_col@2.
+    val req: u64 = if os_name() == "macos" { 0x40087468u64 } else { 0x5413u64 }
+    if t.f_size.call(1i32, req, buf)? != 0 {
+        throw FfiError(Other, "ioctl(TIOCGWINSZ) failed")
+    }
+    Ok(TermSize(le16(buf, 0), le16(buf, 2)))
+}
+
+// ── output ──
+
+pub fun term_write_bytes(t: Term, bytes: u8[]): Throw<usize, FfiError> {
+    if t.is_win {
+        if t.f_write.call(t.h_out, bytes, t.scratch, 0u64)? == 0 {
+            throw FfiError(Other, "WriteFile failed")
+        }
+        return Ok(bytes.len())
+    }
+    var off: usize = 0
+    while off < bytes.len() {
+        val n = t.f_write.call(1i32, bytes[off..bytes.len()])?
+        if n <= 0 {
+            throw FfiError(Other, "write failed")
+        }
+        off = off + (n as usize)
+    }
+    Ok(bytes.len())
+}
+
+pub fun term_write_str(t: Term, text: str): Throw<usize, FfiError> {
+    term_write_bytes(t, text.bytes())
+}
+
+// ── input ──
+
+// Blocking single-byte read.
+fun read_byte_blocking(t: Term): Throw<u8, FfiError> {
+    val buf: u8[] = [0u8, ..1]
+    if t.is_win {
+        if t.f_read.call(t.h_in, buf, t.scratch, 0u64)? == 0 {
+            throw FfiError(Other, "ReadFile(stdin) failed")
+        }
+    } else {
+        if t.f_read.call(0i32, buf)? <= 0 {
+            throw FfiError(Other, "read(stdin) failed")
+        }
+    }
+    Ok(buf[0])
+}
+
+// Whether more input is already buffered (windows route).
+fun win_pending(t: Term): Throw<bool, FfiError> {
+    val buf: u8[] = [0u8, ..4]
+    if t.f_pending.call(t.h_in, buf)? == 0 {
+        throw FfiError(Other, "GetNumberOfConsoleInputEvents failed")
+    }
+    Ok(le32(buf) > 0)
+}
+
+// Blocking key read: first byte blocks, escape-sequence follow-up bytes are
+// consumed only while input keeps arriving (pending check / non-blocking flip),
+// then leftover state resolves as a standalone EscapeKey.
+pub fun term_read_key(t: Term): Throw<Key, FfiError> {
+    val dec = KeyDecoder(0, [0u8, ..8], 0)
+    var k = dec.feed(read_byte_blocking(t)?)
+    if k != UnknownKey {
+        return Ok(k)
+    }
+
+    if t.is_win {
+        while win_pending(t)? {
+            k = dec.feed(read_byte_blocking(t)?)
+            if k != UnknownKey {
+                return Ok(k)
+            }
+        }
+        return Ok(EscapeKey)
+    }
+
+    // posix: flip stdin to non-blocking, drain the pending escape bytes,
+    // restore — flags must be restored on every exit path, so the return
+    // happens only after the restoring call.
+    val fl = t.f_pending.call(0i32, 3i32, 0i64)?            // fcntl(0, F_GETFL)
+    val nb: i32 = if os_name() == "macos" { 16384i32 } else { 2048i32 }  // O_NONBLOCK
+    val r_set = t.f_pending.call(0i32, 4i32, (fl | nb) as i64)?  // F_SETFL
+    var done = false
+    while !done {
+        val buf: u8[] = [0u8, ..1]
+        val n = t.f_read.call(0i32, buf)?
+        if n > 0 {
+            k = dec.feed(buf[0])
+            if k != UnknownKey {
+                done = true
+            }
+        } else {
+            done = true
+        }
+    }
+    val r_restore = t.f_pending.call(0i32, 4i32, fl as i64)?  // F_SETFL back
+    if k != UnknownKey {
+        return Ok(k)
+    }
+    Ok(EscapeKey)
+}

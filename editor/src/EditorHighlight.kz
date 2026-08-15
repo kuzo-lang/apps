@@ -10,7 +10,7 @@
 // Modifying the outer loop's variable inside an inner while loop does not
 // propagate back — the outer loop sees the stale value and loops forever.
 
-import std.terminal.Ansi
+import Ansi
 
 // ─── TokenKind: color category for a token ───
 type TokenKind =

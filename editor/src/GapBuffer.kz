@@ -9,7 +9,6 @@
 // (treating the gap as non-existent). Lazy invalidation: edits set lines_dirty,
 // line queries trigger rebuild on first access.
 
-import std.terminal.Ansi
 
 // LineRange: a line's [start, end) logical byte offset pair
 type LineRange = LineRange(

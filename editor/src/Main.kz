@@ -3,14 +3,13 @@
 import Editor
 import EditorCommands
 import EditorRenderer
-import std.terminal.Session
+import Term
+import Key
 import std.os.Tty
-import std.terminal.Key
-import std.terminal.Ansi
 
 fun main(args: str[]): void {
-    val session = match enter_raw_mode() {
-        Ok(s) => s,
+    val term = match term_open() {
+        Ok(t) => t,
         Err(e) => {
             if !Tty.is_tty(0) {
                 eprint("error: stdin is not a terminal\r\n")
@@ -21,9 +20,9 @@ fun main(args: str[]): void {
             }
             return }
     }
-    defer session.exit_raw_mode()
+    defer term_close(term)
 
-    val size = match session.get_size() {
+    val size = match term_get_size(term) {
         Ok(sz) => sz,
         Err(e) => { eprint("ERR: size " + e.msg + "\r\n"); return }
     }
@@ -37,11 +36,14 @@ fun main(args: str[]): void {
     // Main loop: render frame, then dispatch one key
     while ed.running {
         val out = render_to_string(ed)
-        match session.write_str(out) {
+        match term_write_str(term, out) {
             Ok(_) => {},
             Err(e) => { eprint("ERR: write " + e.msg + "\r\n"); return }
         }
-        val key = session.read_key()
+        val key = match term_read_key(term) {
+            Ok(k) => k,
+            Err(e) => { eprint("ERR: read " + e.msg + "\r\n"); return }
+        }
         dispatch_key(ed, key)
     }
     // Exit message

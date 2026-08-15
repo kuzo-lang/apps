@@ -13,7 +13,7 @@
 import Editor
 import EditorHighlight
 import GapBuffer
-import std.terminal.Ansi
+import Ansi
 
 // Build the complete frame output string.
 // Strategy: clear entire screen (with home cursor), then write each row

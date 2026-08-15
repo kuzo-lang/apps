@@ -5,7 +5,7 @@
 // redirected to prompt editing. Control-key combos handle quit/save/undo/redo.
 
 import Editor
-import std.terminal.Key
+import Key
 
 // Dispatch a decoded key to the appropriate editor operation.
 pub fun handle_key(ed: Editor, key: Key): void {
