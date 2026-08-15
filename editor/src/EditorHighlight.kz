@@ -1,6 +1,6 @@
-// EditorHighlight.kz — syntax highlighting tokenizer for Kuzo
+// EditorHighlight.kz — syntax highlighting tokenizer for Frond
 //
-// Tokenizes a single line of Kuzo source into colored spans.
+// Tokenizes a single line of Frond source into colored spans.
 // Used by EditorRenderer to apply ANSI colors during full-screen redraw.
 //
 // Design: pure byte-level scanner, no regex dependency.
