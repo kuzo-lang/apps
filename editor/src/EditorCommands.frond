@@ -1,4 +1,4 @@
-// EditorCommands.kz — key dispatch
+// EditorCommands.frond — key dispatch
 //
 // Maps decoded Key values to editor operations. Called from the main loop
 // on each keypress. In prompt mode (search/rename), key handling is

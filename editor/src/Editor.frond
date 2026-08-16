@@ -1,4 +1,4 @@
-// Editor.kz — editor state machine + undo/redo
+// Editor.frond — editor state machine + undo/redo
 //
 // Holds the GapBuffer, cursor (line/column), scroll offset, and snapshot-based
 // undo/redo stacks. All mutating logic lives in top-level functions that take

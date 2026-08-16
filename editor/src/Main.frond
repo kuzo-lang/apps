@@ -1,4 +1,4 @@
-// Main.kz — editor entry point
+// Main.frond — editor entry point
 
 import Editor
 import EditorCommands

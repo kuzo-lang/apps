@@ -1,4 +1,4 @@
-// std/terminal/Ansi.kz — ANSI escape sequence construction
+// std/terminal/Ansi.frond — ANSI escape sequence construction
 //
 // Pure Frond, no FFI. Constructs escape sequences as str using \x1b (ESC byte).
 // Provides a comprehensive set of ANSI/VT100 escape sequences for:

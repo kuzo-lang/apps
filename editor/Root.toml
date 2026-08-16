@@ -1,6 +1,6 @@
 [package]
 name = "editor"
-entry = "src/Main.kz"
+entry = "src/Main.frond"
 
 [build]
 output_dir = "out"

@@ -1,9 +1,9 @@
-// Key.kz — key input decoding (editor-local, migrated from std.terminal)
+// Key.frond — key input decoding (editor-local, migrated from std.terminal)
 //
 // KeyDecoder is a pure state machine: feed bytes one at a time via feed();
 // returns a Key when a complete sequence is decoded, or UnknownKey if more
 // bytes are needed. The blocking-read glue that used to live next to it
-// moved into Term.kz (the Lib FFI terminal session).
+// moved into Term.frond (the Lib FFI terminal session).
 //
 // The Key type covers common terminal keys:
 //   - Single-byte: printable chars, Enter, Backspace, Tab

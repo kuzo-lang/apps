@@ -1,10 +1,10 @@
-// EditorHighlight.kz — syntax highlighting tokenizer for Frond
+// EditorHighlight.frond — syntax highlighting tokenizer for Frond
 //
 // Tokenizes a single line of Frond source into colored spans.
 // Used by EditorRenderer to apply ANSI colors during full-screen redraw.
 //
 // Design: pure byte-level scanner, no regex dependency.
-// Token categories map to ANSI 16-color bright variants (see Ansi.kz).
+// Token categories map to ANSI 16-color bright variants (see Ansi.frond).
 //
 // VM WORKAROUND: nested while loops must use a separate loop variable.
 // Modifying the outer loop's variable inside an inner while loop does not

@@ -1,4 +1,4 @@
-// GapBuffer.kz — gap buffer text storage with line view cache
+// GapBuffer.frond — gap buffer text storage with line view cache
 //
 // Memory layout:
 //   buffer[0..gap_start)          = text before cursor

@@ -1,4 +1,4 @@
-// EditorRenderer.kz — full-screen terminal renderer with syntax highlighting
+// EditorRenderer.frond — full-screen terminal renderer with syntax highlighting
 //
 // render_to_string builds the entire frame as a single str (clear screen,
 // visible lines with ANSI colors, status bar, cursor positioning) which the
@@ -189,7 +189,7 @@ fun build_status_bar(ed: Editor): str {
     s
 }
 
-// usize → u16 helper (via i64 intermediate, see Cast.kz conversion chain)
+// usize → u16 helper (via i64 intermediate, see Cast.frond conversion chain)
 fun to_u16(n: usize): u16 {
     n as i64 as u16
 }

@@ -1,4 +1,4 @@
-// Term.kz — terminal session via the builtin Lib FFI (editor-local)
+// Term.frond — terminal session via the builtin Lib FFI (editor-local)
 //
 // Replaces the deleted std.terminal.Session/Raw stack. Everything here is plain
 // Lib.open/lookup/call against system libraries — no compiler terminal support.

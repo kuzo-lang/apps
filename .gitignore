@@ -1,6 +1,6 @@
 # Frond build output
 **/out/
-**/*.kzo
+**/*.fndo
 
 # IDE / Editor
 .idea/
